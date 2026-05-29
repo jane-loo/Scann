@@ -1,6 +1,7 @@
 import numpy as np
 import time
 import json
+import pandas as pd
 from ..models import db, Dataset, AnnIndex, QueryHistory
 from ..data.loader import _dataset_cache, load_dataset, cache_dataset
 from ..index.manager import search_index
@@ -16,7 +17,7 @@ class SearchEngine:
             cache_dataset(dataset_id, data)
         return _dataset_cache[dataset_id]
 
-    def search_by_cell_id(self, dataset_id: int, cell_id: str, index_id: int, top_k: int = 10, user_id: int = None):
+    def search_by_cell_id(self, dataset_id: int, cell_id: str, index_id: int, top_k: int = 10, user_id: int = None, filters: dict = None):
         data = self._ensure_data(dataset_id)
         
         try:
@@ -28,28 +29,34 @@ class SearchEngine:
         query_vector = data['vectors'][idx_in_data]
         
         return self._do_search(dataset_id, query_vector, index_id, top_k, user_id, 
-                               query_type='cell_id', query_input=cell_id)
+                               query_type='cell_id', query_input=cell_id, 
+                               exclude_cell_id=cell_id, filters=filters)
 
-    def search_by_vector(self, dataset_id: int, vector, index_id: int, top_k: int = 10, user_id: int = None):
+    def search_by_vector(self, dataset_id: int, vector, index_id: int, top_k: int = 10, user_id: int = None, filters: dict = None):
         if isinstance(vector, list):
             vector = np.array(vector, dtype=np.float32)
         elif not isinstance(vector, np.ndarray):
             raise ValueError("Vector 必须是列表或 numpy 数组")
         
-        # 简单记录向量的前几个元素作为输入
+        # 验证维度
+        data = self._ensure_data(dataset_id)
+        if len(vector) != data['vectors'].shape[1]:
+            raise ValueError(f"输入向量维度({len(vector)})与数据集维度({data['vectors'].shape[1]})不匹配")
+
         query_input = f"Vector(dim={len(vector)})"
         
         return self._do_search(dataset_id, vector, index_id, top_k, user_id, 
-                               query_type='vector', query_input=query_input)
+                               query_type='vector', query_input=query_input, filters=filters)
 
-    def search_random(self, dataset_id: int, index_id: int, top_k: int = 10, user_id: int = None):
+    def search_random(self, dataset_id: int, index_id: int, top_k: int = 10, user_id: int = None, filters: dict = None):
         data = self._ensure_data(dataset_id)
         random_idx = np.random.randint(0, len(data['cell_ids']))
         cell_id = data['cell_ids'][random_idx]
-        return self.search_by_cell_id(dataset_id, cell_id, index_id, top_k, user_id)
+        return self.search_by_cell_id(dataset_id, cell_id, index_id, top_k, user_id, filters=filters)
 
     def _do_search(self, dataset_id: int, query_vector: np.ndarray, index_id: int, 
-                   top_k: int, user_id: int, query_type: str, query_input: str):
+                   top_k: int, user_id: int, query_type: str, query_input: str,
+                   exclude_cell_id: str = None, filters: dict = None):
         ann_index = db.session.get(AnnIndex, index_id)
         if not ann_index or ann_index.dataset_id != dataset_id:
             raise ValueError(f"索引 {index_id} 不存在或与数据集不匹配")
@@ -57,24 +64,55 @@ class SearchEngine:
         if ann_index.status != 'ready':
             raise ValueError(f"索引 {index_id} 尚未就绪 (状态: {ann_index.status})")
 
+        # 为了排除自身或进行过滤，扩大搜索范围
+        search_k = top_k
+        if exclude_cell_id or filters:
+            search_k = min(top_k * 10, 2000) # 扩大10倍搜索，最多2000
+
         t0 = time.time()
         # 调用 index/manager.py 中的搜索函数
-        indices, distances = search_index(ann_index, query_vector, k=top_k)
+        indices, distances = search_index(ann_index, query_vector, k=search_k)
         elapsed_ms = (time.time() - t0) * 1000
 
         data = _dataset_cache[dataset_id]
         obs  = data['obs']
+        cell_ids = data['cell_ids']
         
         results = []
         for i, dist in zip(indices, distances):
+            current_cell_id = cell_ids[i]
+            
+            # 1. 排除自身
+            if exclude_cell_id and current_cell_id == exclude_cell_id:
+                continue
+                
             row = obs.iloc[i]
+            
+            # 2. 应用过滤 (Exact Match)
+            if filters:
+                match = True
+                for key, val in filters.items():
+                    if key not in row or str(row[key]) != str(val):
+                        match = False
+                        break
+                if not match:
+                    continue
+
+            # 3. 计算相似度 score = 1 / (1 + distance)
+            similarity = 1.0 / (1.0 + float(dist))
+            
             res = {
-                'cell_id': data['cell_ids'][i],
+                'rank': len(results) + 1,
+                'cell_id': current_cell_id,
                 'distance': float(dist),
-                'cell_type': str(row.get('cell_type', 'unknown')),
-                'metadata': {col: str(row[col]) for col in obs.columns[:10] if col in row} # 取前10个列防止太多
+                'similarity': similarity,
+                'metadata': {col: str(row[col]) for col in obs.columns if not pd.isna(row[col])}
             }
             results.append(res)
+            
+            # 达到 top_k 即停止
+            if len(results) >= top_k:
+                break
 
         # 记录查询历史
         history = QueryHistory(
@@ -91,7 +129,7 @@ class SearchEngine:
         db.session.commit()
 
         return {
-            'results': results,
-            'query_time_ms': elapsed_ms,
-            'count': len(results)
+            'query_time_ms': round(elapsed_ms, 2),
+            'top_k': len(results),
+            'results': results
         }

@@ -87,7 +87,23 @@ def upload_dataset():
 @data_bp.route('/', methods=['GET'])
 @login_required
 def list_datasets():
-    datasets = Dataset.query.order_by(Dataset.created_at.desc()).all()
+    # 逻辑：
+    # 1. sysadmin: 看到所有
+    # 2. labadmin: 看到实验室成员上传的所有 (简化为当前看到所有，或后续增加 lab_id)
+    # 3. expert/normal: 看到自己上传的 + 公共的 (upload_by 为空或特定标记)
+    # 4. visitor: 只能看到公共演示数据
+    
+    query = Dataset.query
+    
+    if current_user.role == 'visitor':
+        # 访客只能看到 metadata 标记为 demo 或 upload_by 为空的(演示数据)
+        query = query.filter(Dataset.upload_by.is_(None))
+    elif current_user.role in ['normal', 'expert']:
+        # 普通用户和专家看到自己的 + 演示数据
+        query = query.filter((Dataset.upload_by == current_user.id) | (Dataset.upload_by.is_(None)))
+    # sysadmin 和 labadmin 看到所有 (当前模型下暂无 lab 划分，所以 labadmin 权限等同看到全局)
+    
+    datasets = query.order_by(Dataset.created_at.desc()).all()
     return jsonify([_dataset_to_dict(d) for d in datasets])
 
 
