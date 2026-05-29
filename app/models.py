@@ -66,3 +66,18 @@ class QueryHistory(db.Model):
     result_ids  = db.Column(db.Text)          # JSON 列表
     query_time  = db.Column(db.Float)         # 毫秒
     created_at  = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+class EvaluationReport(db.Model):
+    __tablename__ = 'evaluation_report'
+    id          = db.Column(db.Integer, primary_key=True)
+    dataset_id  = db.Column(db.Integer, db.ForeignKey('dataset.id'))
+    index_id    = db.Column(db.Integer, db.ForeignKey('ann_index.id'))
+    recall_at_k = db.Column(db.Float)
+    qps         = db.Column(db.Float)
+    avg_latency = db.Column(db.Float)
+    n_queries   = db.Column(db.Integer)
+    k           = db.Column(db.Integer)
+    created_at  = db.Column(db.DateTime, default=datetime.utcnow)
+
+    index = db.relationship('AnnIndex', backref='reports')

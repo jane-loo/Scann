@@ -1,5 +1,6 @@
 from flask import Flask
 from flask_login import LoginManager
+from flask_cors import CORS
 from .models import db, User
 from .config import Config
 
@@ -11,6 +12,10 @@ def create_app(test_config: dict = None):
                 template_folder='../templates',
                 static_folder='../static')
     app.config.from_object(Config)
+    
+    # 开启跨域支持
+    CORS(app, supports_credentials=True)
+
     # 测试时在 db.init_app 之前覆盖配置，确保 URI 生效
     if test_config:
         app.config.update(test_config)
@@ -28,10 +33,16 @@ def create_app(test_config: dict = None):
     from .auth.routes   import auth_bp
     from .data.routes   import data_bp
     from .index.routes  import index_bp
+    from .search        import search_bp
+    from .admin         import admin_bp
+    from .evaluate      import evaluate_bp
 
     app.register_blueprint(auth_bp,    url_prefix='/auth')
     app.register_blueprint(data_bp,    url_prefix='/api/datasets')
     app.register_blueprint(index_bp,   url_prefix='/api')
+    app.register_blueprint(search_bp,  url_prefix='/api/search')
+    app.register_blueprint(admin_bp,   url_prefix='/admin')
+    app.register_blueprint(evaluate_bp, url_prefix='/api/evaluate')
 
     # 健康检查路由
     @app.route('/ping')

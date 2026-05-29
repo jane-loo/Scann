@@ -41,3 +41,15 @@ def login():
 def logout():
     logout_user()
     return jsonify({'message': '已退出'})
+
+
+@auth_bp.route('/me', methods=['GET'])
+@login_required
+def get_me():
+    """获取当前登录用户信息"""
+    return jsonify({
+        'id': current_user.id,
+        'username': current_user.username,
+        'email': current_user.email,
+        'role': current_user.role
+    })

@@ -113,13 +113,23 @@ def build_index_sync(app,
             db.session.commit()
 
         except Exception as exc:
-            ann_index.status = 'error'
-            # 将错误信息附加到 params（不覆盖原始 params）
-            existing = json.loads(ann_index.params or '{}')
-            existing['_error'] = str(exc)
-            ann_index.params = json.dumps(existing, ensure_ascii=False)
-            db.session.commit()
-            raise   # 重新抛出，方便调试日志
+            db.session.rollback()  # 必须回滚，否则 session 会被污染
+            print(f'[错误] 索引 {ann_index_id} 构建失败: {exc}')
+            
+            # 重新获取对象以规避之前的 PendingRollbackError
+            try:
+                # 使用 db.session.get 重新加载对象
+                ann_index = db.session.get(AnnIndex, ann_index_id)
+                if ann_index:
+                    ann_index.status = 'error'
+                    existing = json.loads(ann_index.params or '{}')
+                    existing['_error'] = str(exc)
+                    ann_index.params = json.dumps(existing, ensure_ascii=False)
+                    db.session.commit()
+            except Exception as e2:
+                print(f'[严重错误] 无法保存错误状态到数据库: {e2}')
+                db.session.rollback()
+            raise
 
 
 # ──────────────────────────────────────────────────────────────────────────────

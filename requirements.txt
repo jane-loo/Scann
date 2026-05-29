@@ -2,6 +2,7 @@
 flask==3.0.3
 flask-sqlalchemy==3.1.1
 flask-login==0.6.3
+flask-cors==4.0.1
 werkzeug==3.0.3
 
 # 单细胞数据处理
