@@ -1,0 +1,23 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# 数据文件（体积过大，不入库）
+data/uploads/
+data/indexes/
+*.h5ad
+
+# 数据库文件
+scann.db
+
+# IDE / 工具
+.vscode/
+.idea/
+*.swp
+.claude/
+
+# doc
+doc/

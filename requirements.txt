@@ -1,0 +1,25 @@
+# Web 框架
+flask==3.0.3
+flask-sqlalchemy==3.1.1
+flask-login==0.6.3
+flask-cors==4.0.1
+werkzeug==3.0.3
+
+# 单细胞数据处理
+anndata==0.10.8
+scanpy==1.10.2
+
+# 向量检索（faiss-cpu 和 hnswlib 均请用 conda 单独安装，见 README）
+# conda install -c conda-forge faiss-cpu hnswlib
+
+# 数值计算
+numpy==1.26.4
+scipy==1.13.1
+pandas==2.2.2
+
+# 降维可视化
+scikit-learn==1.5.1
+umap-learn==0.5.6
+
+# 测试
+pytest==9.0.3
