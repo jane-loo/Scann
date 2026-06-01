@@ -54,7 +54,6 @@ def create_app(test_config: dict = None):
         from flask import render_template, send_from_directory
         import os
         return send_from_directory(os.path.join(app.root_path, '../templates'), 'index.html')
-
     # 7.1 启动时预加载已有数据集到内存缓存（TESTING 模式跳过）
     if not app.config.get('TESTING', False):
         _preload_datasets(app)

@@ -117,15 +117,19 @@ def get_dataset(dataset_id):
     dataset = Dataset.query.get_or_404(dataset_id)
     data    = _ensure_cached(dataset_id, dataset.file_path)
 
-    # 细胞类型分布统计
-    ct_dist = {}
-    if 'cell_type' in data['obs'].columns:
-        ct_dist = (data['obs']['cell_type']
-                   .value_counts()
-                   .to_dict())
+    # 计算所有列的唯一值分布
+    all_filters = {}
+    obs = data['obs']
+    for col in obs.columns:
+        # 只为分类变量（非连续数值且唯一值不多的）生成下拉列表
+        if obs[col].dtype == 'object' or obs[col].dtype.name == 'category':
+            # 限制唯一值数量，避免下拉框太长
+            unique_vals = obs[col].dropna().unique().tolist()
+            if len(unique_vals) <= 100:
+                all_filters[col] = unique_vals
 
     result = _dataset_to_dict(dataset)
-    result['cell_type_distribution'] = ct_dist
+    result['cell_type_distribution'] = all_filters  # 重用该字段传输所有过滤项
     result['indexes'] = [_index_to_dict(i) for i in dataset.indexes]
     return jsonify(result)
 

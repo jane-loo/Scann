@@ -38,9 +38,13 @@
             const [selectedDsId, setSelectedDsId] = useState('');
             const [selectedIdxId, setSelectedIdxId] = useState('');
             
+            // Filter Options Cache
+            const [filterOptions, setFilterOptions] = useState({}); // { key: [val1, val2... ] }
+            
             // Search State
             const [searchType, setSearchType] = useState('id'); 
             const [queryInput, setQueryInput] = useState('Cell_005');
+            const [filters, setFilters] = useState({}); // 支持多重过滤
             const [filterKey, setFilterKey] = useState('cell_type');
             const [filterVal, setFilterVal] = useState('');
             const [searchResults, setSearchResults] = useState(null);
@@ -95,7 +99,16 @@
                 if (currentDataset && !currentDataset.obs_columns.includes(filterKey)) {
                     setFilterKey(currentDataset.obs_columns[0] || '');
                 }
-            }, [readyIndices, currentDataset]);
+
+                // 获取当前数据集所有列的所有唯一值，用于前端下拉框展示
+                if (selectedDsId) {
+                    ScannAPI.getDatasetDetail(selectedDsId).then(data => {
+                        // 假设后端详情接口返回了 cell_type_distribution，我们从中提取唯一值
+                        // 或者动态从 UMAP 数据中提取（为了演示，这里使用 cache 或模拟获取）
+                        setFilterOptions(data.cell_type_distribution || {});
+                    });
+                }
+            }, [readyIndices, currentDataset, selectedDsId]);
 
             const handleLogin = async (e) => {
                 e.preventDefault();
@@ -124,9 +137,10 @@
                 setSearchLoading(true);
                 setSearchResults(null);
                 
-                const filters = {};
+                // 使用已存储的多重过滤器，如果当前下拉框也有选择值则临时加入
+                const searchFilters = { ...filters };
                 if (filterKey && filterVal) {
-                    filters[filterKey] = filterVal.split(',').map(s => s.trim());
+                    searchFilters[filterKey] = [filterVal];
                 }
 
                 try {
@@ -137,7 +151,7 @@
                             index_id: Number(selectedIdxId),
                             cell_id: queryInput,
                             top_k: 10,
-                            filters
+                            filters: searchFilters
                         });
                     } else {
                         let vec;
@@ -147,7 +161,7 @@
                             index_id: Number(selectedIdxId),
                             vector: vec,
                             top_k: 10,
-                            filters
+                            filters: searchFilters
                         });
                     }
                     setSearchResults(res);
@@ -278,18 +292,55 @@
 
                                         <section className="card p-6 space-y-4">
                                             <div className="flex justify-between items-center">
-                                                <h3 className="text-[10px] font-black uppercase text-slate-400 tracking-widest">2. 元数据过滤</h3>
-                                                <button onClick={()=>{setFilterVal('')}} className="text-[10px] font-black text-blue-600 uppercase">清除值</button>
+                                                <h3 className="text-[10px] font-black uppercase text-slate-400 tracking-widest">2. 元数据过滤 (多重)</h3>
+                                                <button onClick={()=>{setFilters({}); setFilterVal('');}} className="text-[10px] font-black text-blue-600 uppercase">清除全部</button>
                                             </div>
+                                            
+                                            {/* 已添加的过滤器展示 */}
+                                            {Object.keys(filters).length > 0 && (
+                                                <div className="flex flex-wrap gap-2 mb-2 p-2 bg-blue-50 rounded-xl border border-blue-100">
+                                                    {Object.entries(filters).map(([k, v]) => (
+                                                        <span key={k} className="px-2 py-1 bg-white border border-blue-200 rounded-lg text-[10px] font-bold flex items-center gap-1 text-blue-700">
+                                                            {k}: {Array.isArray(v) ? v.join(',') : v}
+                                                            <button onClick={() => {
+                                                                const newF = {...filters};
+                                                                delete newF[k];
+                                                                setFilters(newF);
+                                                            }} className="hover:text-red-500 font-black">×</button>
+                                                        </span>
+                                                    ))}
+                                                </div>
+                                            )}
+
                                             <div className="space-y-3">
-                                                <label className="text-[9px] font-black text-slate-400 uppercase">选择过滤字段 (Key)</label>
-                                                <select className="w-full p-3 bg-slate-50 rounded-xl text-xs font-bold border-none" value={filterKey} onChange={e=>setFilterKey(e.target.value)}>
-                                                    {currentDataset?.obs_columns.map(c => <option key={c} value={c}>{c}</option>)}
-                                                    {(!currentDataset || currentDataset.obs_columns.length === 0) && <option value="">无可用字段</option>}
-                                                </select>
-                                                <label className="text-[9px] font-black text-slate-400 uppercase">填写目标值 (Value)</label>
-                                                <input placeholder="如: TypeA (不可为空)" className="w-full p-3 bg-slate-50 rounded-xl text-xs font-bold border-none" value={filterVal} onChange={e=>setFilterVal(e.target.value)} />
-                                                <p className="text-[9px] text-slate-400 italic">若数据集无此 Key 或 Value 不匹配，结果将为空。</p>
+                                                <div className="flex gap-2">
+                                                    <div className="flex-1">
+                                                        <label className="text-[9px] font-black text-slate-400 uppercase">字段</label>
+                                                        <select className="w-full p-2 bg-slate-50 rounded-xl text-xs font-bold border-none" value={filterKey} onChange={e=>setFilterKey(e.target.value)}>
+                                                            {currentDataset?.obs_columns.map(c => <option key={c} value={c}>{c}</option>)}
+                                                        </select>
+                                                    </div>
+                                                    <div className="flex-[2]">
+                                                        <label className="text-[9px] font-black text-slate-400 uppercase">目标值</label>
+                                                        <div className="flex gap-1">
+                                                            <select className="w-full p-2 bg-slate-50 rounded-xl text-xs font-bold border-none" value={filterVal} onChange={e=>setFilterVal(e.target.value)}>
+                                                                <option value="">请选择...</option>
+                                                                {(filterOptions[filterKey] || []).map(v => (
+                                                                    <option key={v} value={v}>{v}</option>
+                                                                ))}
+                                                            </select>
+                                                            <button 
+                                                                onClick={() => {
+                                                                    if(!filterKey || !filterVal) return;
+                                                                    setFilters({...filters, [filterKey]: [filterVal]});
+                                                                    setFilterVal('');
+                                                                }}
+                                                                className="px-3 bg-slate-900 text-white rounded-xl font-black text-xs hover:bg-blue-600 transition-colors"
+                                                            >+</button>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                                <p className="text-[9px] text-slate-400 italic">点 + 号添加多个过滤条件，它们将以 AND 逻辑共同作用。</p>
                                             </div>
                                         </section>
 

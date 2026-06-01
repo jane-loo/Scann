@@ -44,10 +44,9 @@ def logout():
 
 
 @auth_bp.route('/me', methods=['GET'])
+@login_required
 def get_me():
     """获取当前登录用户信息"""
-    if not current_user.is_authenticated:
-        return jsonify({'error': '未登录'}), 401
     return jsonify({
         'id': current_user.id,
         'username': current_user.username,

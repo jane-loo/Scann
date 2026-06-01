@@ -136,7 +136,6 @@ class FaissIndex:
         except Exception as e:
             # 降级
             self.index = faiss.read_index(path)
-            
         self.dim    = self.index.d
         self.metric = metric
 
