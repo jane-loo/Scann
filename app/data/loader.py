@@ -10,6 +10,10 @@ _dataset_cache: dict = {}
 _KEY_OBS_COLS = ['cell_type', 'disease', 'AgeGroup', 'donor_id',
                  'sex', 'tissue', 'author_cell_type', 'Phase']
 
+# 无 X_pca 时自动向量化参数
+DEFAULT_PCA_COMPONENTS = 30
+SCANN_UNS_KEY = 'scann_vectorization'
+
 
 # ---------------------------------------------------------------------------
 # 公开接口
@@ -35,9 +39,109 @@ def validate_h5ad(file_path: str) -> tuple:
     return True, None
 
 
-def load_dataset(file_path: str) -> dict:
+def _resolve_pca_components(n_obs: int, n_vars: int,
+                            requested: int = DEFAULT_PCA_COMPONENTS) -> int:
+    """PCA 成分数受细胞数、基因数上限约束。"""
+    return max(2, min(requested, n_obs - 1, n_vars))
+
+
+def _matrix_extremes(X) -> tuple[float, float]:
+    if sp.issparse(X):
+        return float(X.max()), float(X.min())
+    arr = np.asarray(X)
+    return float(arr.max()), float(arr.min())
+
+
+def _compute_pca_vectors(adata, n_comps: int = DEFAULT_PCA_COMPONENTS) -> tuple[np.ndarray, dict]:
+    """
+    对无 obsm.X_pca 的数据执行标准单细胞向量化：
+    归一化 → log1p → 高变基因 → PCA（Scanpy）。
+    """
+    work = adata.copy()
+    n_comps = _resolve_pca_components(work.n_obs, work.n_vars, n_comps)
+
+    max_val, min_val = _matrix_extremes(work.X)
+    normalized = False
+    # 已 log 归一化的矩阵通常数值较小；原始 count 则先做 normalize + log1p
+    if max_val > 30 or min_val < 0:
+        sc.pp.normalize_total(work, target_sum=1e4)
+        sc.pp.log1p(work)
+        normalized = True
+
+    n_hvg = min(2000, work.n_vars)
+    hvg_applied = False
+    if work.n_vars > 50:
+        sc.pp.highly_variable_genes(work, n_top_genes=n_hvg, flavor='seurat', subset=True)
+        hvg_applied = True
+
+    sc.tl.pca(work, n_comps=n_comps, svd_solver='arpack', random_state=0)
+    vectors = np.asarray(work.obsm['X_pca'], dtype=np.float32)
+
+    steps = []
+    if normalized:
+        steps.append('normalize_total(1e4)')
+        steps.append('log1p')
+    else:
+        steps.append('detect_log_normalized(skip normalize)')
+    if hvg_applied:
+        steps.append(f'highly_variable_genes({work.n_vars})')
+    steps.append(f'PCA(n_comps={n_comps})')
+
+    meta = {
+        'source':       'auto_pca',
+        'engine':       'scanpy',
+        'n_components': n_comps,
+        'n_genes_used': int(work.n_vars),
+        'pipeline':     ' → '.join(steps),
+        'computed_by':  'Scann 上传向量化流水线',
+    }
+    return vectors, meta
+
+
+def _read_file_vectorization(adata, vectors: np.ndarray) -> dict:
+    """读取 .h5ad 中已有的向量化说明，或推断为预置 X_pca。"""
+    if SCANN_UNS_KEY in adata.uns:
+        meta = dict(adata.uns[SCANN_UNS_KEY])
+        meta.setdefault('n_components', int(vectors.shape[1]))
+        return meta
+    return {
+        'source':       'file',
+        'engine':       'precomputed',
+        'n_components': int(vectors.shape[1]),
+        'pipeline':     'obsm.X_pca（上传前已存在于 .h5ad）',
+        'computed_by':  '用户 / 上游分析流程',
+    }
+
+
+def ensure_pca_vectors(file_path: str,
+                       n_comps: int = DEFAULT_PCA_COMPONENTS,
+                       persist: bool = True) -> tuple[np.ndarray, dict, bool]:
+    """
+    确保数据集具备可用于 ANN 的 PCA 向量。
+
+    返回 (vectors, vectorization_meta, was_computed)。
+    若本次新计算 PCA 且 persist=True，会写回 obsm.X_pca 与 uns.scann_vectorization。
+    """
+    adata = sc.read_h5ad(file_path)
+
+    if 'X_pca' in adata.obsm:
+        vectors = np.asarray(adata.obsm['X_pca'], dtype=np.float32)
+        return vectors, _read_file_vectorization(adata, vectors), False
+
+    vectors, meta = _compute_pca_vectors(adata, n_comps=n_comps)
+    adata.obsm['X_pca'] = vectors
+    adata.uns[SCANN_UNS_KEY] = meta
+
+    if persist:
+        adata.write_h5ad(file_path)
+
+    return vectors, meta, True
+
+
+def load_dataset(file_path: str, persist_pca: bool = True) -> dict:
     """
     读取 .h5ad 文件，提取向量和元数据。
+    若缺少 obsm.X_pca，自动执行 Scanpy PCA 向量化（可选写回文件）。
 
     返回字典包含：
       vectors     np.ndarray  float32  (n_cells, n_dims)
@@ -50,15 +154,22 @@ def load_dataset(file_path: str) -> dict:
       obs_columns list[str]   所有 obs 列名
       umap_coords np.ndarray  float32  (n_cells, 2) 或 None
       tsne_coords np.ndarray  float32  (n_cells, 2) 或 None
+      vectorization dict      向量化来源与 PCA 参数说明
+      pca_computed  bool      本次是否新计算 PCA
     """
     adata = sc.read_h5ad(file_path)
+    pca_computed = False
 
-    # 向量优先级：X_pca > 原始矩阵
     if 'X_pca' in adata.obsm:
-        vectors = np.array(adata.obsm['X_pca'], dtype=np.float32)
+        vectors = np.asarray(adata.obsm['X_pca'], dtype=np.float32)
+        vectorization = _read_file_vectorization(adata, vectors)
     else:
-        X = adata.X.toarray() if sp.issparse(adata.X) else np.array(adata.X)
-        vectors = X.astype(np.float32)
+        vectors, vectorization = _compute_pca_vectors(adata)
+        adata.obsm['X_pca'] = vectors
+        adata.uns[SCANN_UNS_KEY] = vectorization
+        pca_computed = True
+        if persist_pca:
+            adata.write_h5ad(file_path)
 
     obs      = adata.obs
     cell_ids = adata.obs_names.tolist()
@@ -72,17 +183,26 @@ def load_dataset(file_path: str) -> dict:
     tsne_coords = (np.array(adata.obsm['X_tsne'], dtype=np.float32)
                    if 'X_tsne' in adata.obsm else None)
 
+    # 无 UMAP 时用 PCA 前两维作为 2D 可视化回退
+    if umap_coords is None and vectors.shape[1] >= 2:
+        umap_coords = vectors[:, :2].copy()
+        if pca_computed:
+            vectorization = dict(vectorization)
+            vectorization['viz_fallback'] = 'PCA Dim1×Dim2（无 X_umap 时的散点图回退）'
+
     return {
-        'vectors':     vectors,
-        'cell_ids':    cell_ids,
-        'obs':         obs,
-        'n_cells':     adata.n_obs,
-        'n_genes':     adata.n_vars,
-        'n_dims':      vectors.shape[1],
-        'cell_types':  cell_types,
-        'obs_columns': obs_columns,
-        'umap_coords': umap_coords,
-        'tsne_coords': tsne_coords,
+        'vectors':       vectors,
+        'cell_ids':      cell_ids,
+        'obs':           obs,
+        'n_cells':       adata.n_obs,
+        'n_genes':       adata.n_vars,
+        'n_dims':        vectors.shape[1],
+        'cell_types':    cell_types,
+        'obs_columns':   obs_columns,
+        'umap_coords':   umap_coords,
+        'tsne_coords':   tsne_coords,
+        'vectorization': vectorization,
+        'pca_computed':  pca_computed,
     }
 
 

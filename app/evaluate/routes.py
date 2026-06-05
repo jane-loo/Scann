@@ -12,6 +12,24 @@ from . import evaluate_bp
 _ANN_INDEX_TYPES = {'hnsw', 'ivf_flat', 'ivf_pq'}
 
 
+def _report_to_dict(report: EvaluationReport) -> dict:
+    ds = db.session.get(Dataset, report.dataset_id)
+    idx = report.index
+    return {
+        'id': report.id,
+        'dataset_id': report.dataset_id,
+        'dataset_name': ds.name if ds else None,
+        'index_id': report.index_id,
+        'index_type': idx.index_type if idx else 'unknown',
+        'recall_at_k': report.recall_at_k,
+        'qps': report.qps,
+        'avg_latency_ms': report.avg_latency,
+        'n_queries': report.n_queries,
+        'k': report.k,
+        'created_at': report.created_at.isoformat(),
+    }
+
+
 def _find_exact_baseline(dataset_id: int) -> AnnIndex | None:
     """返回该数据集上可用的 exact 索引，作为 Ground Truth。"""
     for idx in AnnIndex.query.filter_by(dataset_id=dataset_id, index_type='exact').all():
@@ -84,8 +102,25 @@ def _run_single_benchmark(dataset_id: int, target_index: AnnIndex, k: int, n_que
         'avg_ann_time_ms': round(avg_ann_latency, 2),
         'avg_exact_time_ms': round(avg_exact_latency, 2),
         'speedup': round(speedup, 2),
+        'k': k,
         'timestamp': report.created_at.isoformat(),
     }
+
+
+@evaluate_bp.route('/reports', methods=['GET'])
+@login_required_api
+@expert_required
+def list_reports():
+    """列出评测报告（可按 dataset_id 过滤）。"""
+    dataset_id = request.args.get('dataset_id', type=int)
+    limit = min(100, max(1, int(request.args.get('limit', 30))))
+
+    q = EvaluationReport.query.order_by(EvaluationReport.created_at.desc())
+    if dataset_id:
+        q = q.filter_by(dataset_id=dataset_id)
+
+    reports = q.limit(limit).all()
+    return jsonify([_report_to_dict(r) for r in reports])
 
 
 @evaluate_bp.route('/<int:dataset_id>', methods=['POST'])
@@ -175,15 +210,5 @@ def get_report(dataset_id):
     
     if not report:
         return jsonify({'error': '未找到评测报告'}), 404
-    
-    return jsonify({
-        'id': report.id,
-        'index_id': report.index_id,
-        'index_type': report.index.index_type if report.index else 'unknown',
-        'recall_at_k': report.recall_at_k,
-        'qps': report.qps,
-        'avg_latency_ms': report.avg_latency,
-        'n_queries': report.n_queries,
-        'k': report.k,
-        'created_at': report.created_at.isoformat()
-    })
+
+    return jsonify(_report_to_dict(report))

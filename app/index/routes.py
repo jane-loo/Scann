@@ -362,6 +362,8 @@ def _joint_search(ann_index: AnnIndex, params_dict: dict):
             mapping = _json.load(f)
 
     t0 = time.time()
+    exclude_cell_id = None
+    query_cell_id   = None
 
     if query_type == 'vector':
         raw = body.get('query_input')
@@ -379,6 +381,8 @@ def _joint_search(ann_index: AnnIndex, params_dict: dict):
         pos   = entry['pos_in_dataset']
         query_vec  = _dataset_cache[ds_id]['vectors'][pos]
         query_repr = f"{ds_id}:{entry['cell_id']}"
+        exclude_cell_id = entry['cell_id']
+        query_cell_id   = entry['cell_id']
 
     elif query_type == 'cell_id':
         cell_id = body.get('query_input')
@@ -393,6 +397,8 @@ def _joint_search(ann_index: AnnIndex, params_dict: dict):
                 pos = c['cell_ids'].index(cell_id)
                 query_vec  = c['vectors'][pos]
                 query_repr = f'{ds_id}:{cell_id}'
+                exclude_cell_id = cell_id
+                query_cell_id   = cell_id
                 found = True
                 break
         if not found:
@@ -401,16 +407,22 @@ def _joint_search(ann_index: AnnIndex, params_dict: dict):
     else:
         return jsonify({'error': f'不支持的 query_type: {query_type}'}), 400
 
+    search_k = top_k
+    if exclude_cell_id:
+        search_k = min(top_k * 10, 2000)
+
     try:
-        raw_results = search_joint_index(ann_index, query_vec, k=top_k, nprobe=nprobe)
+        raw_results = search_joint_index(ann_index, query_vec, k=search_k, nprobe=nprobe)
     except RuntimeError as e:
         return jsonify({'error': str(e)}), 500
 
     elapsed_ms = round((time.time() - t0) * 1000, 2)
 
-    # 附加元数据
+    # 附加元数据（排除查询细胞自身，与单库检索一致）
     results = []
-    for rank, item in enumerate(raw_results, start=1):
+    for item in raw_results:
+        if exclude_cell_id and item['cell_id'] == exclude_cell_id:
+            continue
         ds_id = item['dataset_id']
         pos   = item['pos_in_dataset']
         meta  = {}
@@ -420,12 +432,14 @@ def _joint_search(ann_index: AnnIndex, params_dict: dict):
                 row = obs.iloc[pos]
                 meta = {col: str(row[col]) for col in _META_COLS if col in obs.columns}
         results.append({
-            'rank':       rank,
+            'rank':       len(results) + 1,
             'dataset_id': ds_id,
             'cell_id':    item['cell_id'],
             'distance':   item['distance'],
             **meta,
         })
+        if len(results) >= top_k:
+            break
 
     user_id = current_user.id if current_user.is_authenticated else None
     _write_history(user_id, dataset_ids[0] if dataset_ids else None,
@@ -438,6 +452,7 @@ def _joint_search(ann_index: AnnIndex, params_dict: dict):
         'dataset_ids':   dataset_ids,
         'query_type':    query_type,
         'query_input':   str(query_repr),
+        'query_cell_id': query_cell_id or ('Vector' if query_type == 'vector' else None),
         'top_k':         top_k,
         'query_time_ms': elapsed_ms,
         'results':       results,
@@ -501,13 +516,14 @@ def _index_to_dict(i: AnnIndex) -> dict:
 
 def _history_to_dict(h: QueryHistory) -> dict:
     return {
-        'id':         h.id,
-        'user_id':    h.user_id,
-        'dataset_id': h.dataset_id,
-        'query_type': h.query_type,
-        'index_type': h.index_type,
-        'top_k':      h.top_k,
-        'query_time': h.query_time,
-        'result_ids': json.loads(h.result_ids) if h.result_ids else [],
-        'created_at': h.created_at.isoformat(),
+        'id':          h.id,
+        'user_id':     h.user_id,
+        'dataset_id':  h.dataset_id,
+        'query_type':  h.query_type,
+        'query_input': h.query_input,
+        'index_type':  h.index_type,
+        'top_k':       h.top_k,
+        'query_time':  h.query_time,
+        'result_ids':  json.loads(h.result_ids) if h.result_ids else [],
+        'created_at':  h.created_at.isoformat(),
     }

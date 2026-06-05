@@ -7,7 +7,7 @@ import anndata as ad
 from app import create_app, db
 from app.models import User, Dataset, AnnIndex
 from app.data.loader import load_dataset, cache_dataset
-from app.index.manager import build_index_sync
+from app.index.manager import build_index_sync, build_joint_index_sync
 
 def create_sample_h5ad(path, name):
     n_cells, n_genes, n_dims = 100, 200, 30
@@ -101,7 +101,39 @@ with app.app_context():
         data = load_dataset(path)
         cache_dataset(ds.id, data)
 
+        ds.vector_meta = json.dumps(data['vectorization'], ensure_ascii=False)
+        db.session.commit()
+
         for index_type in ('hnsw', 'exact'):
             build_dataset_index(app, ds.id, index_type, d, index_folder)
 
-    print("Database Reset Done with 2 Datasets and built indexes.")
+    dataset_ids = [ds.id for ds in Dataset.query.order_by(Dataset.id).all()]
+    if len(dataset_ids) >= 2:
+        ds1 = dataset_ids[0]
+        n_dims = db.session.get(Dataset, ds1).n_dims or 30
+        params = {'joint': True, 'dataset_ids': dataset_ids, 'dim': n_dims}
+        joint = AnnIndex(
+            dataset_id=ds1,
+            index_type='hnsw',
+            metric='l2',
+            params=json.dumps(params, ensure_ascii=False),
+            status='building',
+        )
+        db.session.add(joint)
+        db.session.commit()
+        try:
+            build_joint_index_sync(
+                app,
+                ann_index_id=joint.id,
+                index_type='hnsw',
+                metric='l2',
+                params=params,
+                index_folder=index_folder,
+            )
+            db.session.expire_all()
+            built = db.session.get(AnnIndex, joint.id)
+            print(f'  - joint hnsw -> {built.status} ({built.params})')
+        except Exception as exc:
+            print(f'[reset_all] 联合索引构建失败: {exc}')
+
+    print("Database Reset Done with 2 Datasets, single indexes, and joint index.")

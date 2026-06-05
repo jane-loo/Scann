@@ -320,15 +320,28 @@ class TestJointSearch:
         assert ds2_id in ds_ids, '结果应包含来自 Dataset2 的细胞'
 
     def test_cell_id_search_across_datasets(self, auth_client, joint_hnsw_id):
-        """cell_id 查询：用 Dataset2 的细胞在联合索引中搜索。"""
+        """cell_id 查询：结果中不应包含查询细胞自身。"""
+        cell_id = 'DS99_CELL_0000'
         resp = auth_client.post(f'/api/indexes/{joint_hnsw_id}/search',
                                 json={'query_type': 'cell_id',
-                                      'query_input': 'DS99_CELL_0000',
+                                      'query_input': cell_id,
                                       'top_k': 5})
         assert resp.status_code == 200
-        results = resp.get_json()['results']
+        body = resp.get_json()
+        results = body['results']
         assert len(results) >= 1
-        assert results[0]['cell_id'] == 'DS99_CELL_0000'
+        assert body.get('query_cell_id') == cell_id
+        assert all(r['cell_id'] != cell_id for r in results)
+
+    def test_random_search_excludes_query_cell(self, auth_client, joint_hnsw_id):
+        resp = auth_client.post(f'/api/indexes/{joint_hnsw_id}/search',
+                                json={'query_type': 'random', 'top_k': 5})
+        assert resp.status_code == 200
+        body = resp.get_json()
+        qin = body['query_input']
+        query_cell = qin.split(':', 1)[1] if ':' in qin else qin
+        assert body.get('query_cell_id') == query_cell
+        assert all(r['cell_id'] != query_cell for r in body['results'])
 
     def test_vector_search(self, auth_client, joint_hnsw_id):
         vec = [0.0] * 10   # 10 维零向量

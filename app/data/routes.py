@@ -61,8 +61,8 @@ def upload_dataset():
         os.remove(save_path)
         return jsonify({'error': err}), 400
 
-    # 读取元数据
-    data = load_dataset(save_path)
+    # 读取元数据（无 X_pca 时自动 PCA 并向量化）
+    data = load_dataset(save_path, persist_pca=True)
 
     dataset = Dataset(
         name        = name,
@@ -73,6 +73,7 @@ def upload_dataset():
         n_dims      = data['n_dims'],
         cell_types  = json.dumps(data['cell_types'],  ensure_ascii=False),
         obs_columns = json.dumps(data['obs_columns'], ensure_ascii=False),
+        vector_meta = json.dumps(data['vectorization'], ensure_ascii=False),
         upload_by   = current_user.id,
     )
     db.session.add(dataset)
@@ -81,8 +82,18 @@ def upload_dataset():
     # 放入内存缓存
     cache_dataset(dataset.id, data)
 
+    message = '上传成功'
+    if data.get('pca_computed'):
+        v = data['vectorization']
+        message = (
+            f"上传成功：未检测到 obsm.X_pca，系统已自动 PCA 向量化"
+            f"（{v.get('n_components')} 维）。"
+        )
+
     return jsonify({
-        'message': '上传成功',
+        'message': message,
+        'pca_computed': data.get('pca_computed', False),
+        'vectorization': data.get('vectorization'),
         'dataset': _dataset_to_dict(dataset),
     }), 201
 
@@ -403,7 +414,19 @@ def _safe_val(v):
     return str(v)
 
 
+def _vectorization_from_dataset(d: Dataset) -> dict:
+    if d.vector_meta:
+        return json.loads(d.vector_meta)
+    return {
+        'source':       'file',
+        'n_components': d.n_dims,
+        'pipeline':     'obsm.X_pca（历史数据）',
+        'computed_by':  '用户 / 上游分析流程',
+    }
+
+
 def _dataset_to_dict(d: Dataset) -> dict:
+    vectorization = _vectorization_from_dataset(d)
     return {
         'id':          d.id,
         'name':        d.name,
@@ -413,6 +436,8 @@ def _dataset_to_dict(d: Dataset) -> dict:
         'n_dims':      d.n_dims,
         'cell_types':  json.loads(d.cell_types)  if d.cell_types  else [],
         'obs_columns': json.loads(d.obs_columns) if d.obs_columns else [],
+        'vector_source': vectorization.get('source', 'file'),
+        'vectorization': vectorization,
         'created_at':  d.created_at.isoformat(),
     }
 

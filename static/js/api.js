@@ -44,18 +44,33 @@ const ScannAPI = {
 
     // Indexes
     buildIndex: (data) => api.post('/api/indexes/build', data),
+    buildJointIndex: (data) => api.post('/api/indexes/joint_build', data),
     getIndexes: () => api.get('/api/indexes/'),
+    getIndex: (id) => api.get(`/api/indexes/${id}`),
     deleteIndex: (id) => api.delete(`/api/indexes/${id}`),
+    searchJointIndex: (indexId, data) => api.post(`/api/indexes/${indexId}/search`, data),
 
     // Search
     searchByCell: (data) => api.post('/api/search/by_cell_id', data),
     searchByVector: (data) => api.post('/api/search/by_vector', data),
     searchRandom: (data) => api.post('/api/search/random', data),
+    getQueryHistory: (params = {}) => {
+        const qs = new URLSearchParams();
+        Object.entries(params).forEach(([k, v]) => { if (v != null && v !== '') qs.set(k, v); });
+        const q = qs.toString();
+        return api.get(`/api/history/${q ? '?' + q : ''}`);
+    },
     getHistory: (limit = 20) => api.get(`/api/search/history?limit=${limit}`),
 
     // Evaluation
     runEvaluation: (datasetId, data) => api.post(`/api/evaluate/${datasetId}`, data),
     runBatchEvaluation: (datasetId, data) => api.post(`/api/evaluate/${datasetId}/batch`, data),
+    listEvaluationReports: (params = {}) => {
+        const qs = new URLSearchParams();
+        Object.entries(params).forEach(([k, v]) => { if (v != null && v !== '') qs.set(k, v); });
+        const q = qs.toString();
+        return api.get(`/api/evaluate/reports${q ? '?' + q : ''}`);
+    },
     getEvaluationReport: (datasetId) => api.get(`/api/evaluate/${datasetId}/report`),
 
     // Admin

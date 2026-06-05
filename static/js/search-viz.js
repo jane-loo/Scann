@@ -316,12 +316,203 @@
         }
     }
 
+    async function fetchJointEmbedData(datasetIds) {
+        const unique = [...new Set((datasetIds || []).map(Number))].filter((id) => id > 0);
+        const datasets = await Promise.all(
+            unique.map(async (dataset_id) => {
+                const embed = await fetchEmbedData(dataset_id);
+                return { dataset_id, ...embed };
+            }),
+        );
+        const sources = [...new Set(datasets.map((d) => d.source))];
+        return {
+            datasets,
+            is_joint: true,
+            source: sources.length === 1 ? sources[0] : sources.join(' · '),
+        };
+    }
+
+    const JOINT_DS_BG = [
+        'rgba(148, 163, 184, 0.28)',
+        'rgba(167, 139, 250, 0.22)',
+        'rgba(96, 165, 250, 0.22)',
+        'rgba(52, 211, 153, 0.2)',
+    ];
+
+    function resolveJointQuery(jointEmbed, queryCellId, queryInput, fallbackQueryId) {
+        const candidates = [];
+        if (queryInput && String(queryInput).includes(':')) {
+            const parts = String(queryInput).split(':');
+            const dsId = Number(parts[0]);
+            const cellId = parts.slice(1).join(':');
+            if (dsId && cellId) candidates.push({ dataset_id: dsId, cell_id: cellId });
+        }
+        [queryCellId, fallbackQueryId].filter(Boolean).forEach((cid) => {
+            if (cid === 'Vector') return;
+            for (const d of jointEmbed.datasets || []) {
+                const idxMap = cellIdIndexMap(d.cell_ids || []);
+                if (idxMap[String(cid)] !== undefined) {
+                    candidates.push({ dataset_id: d.dataset_id, cell_id: String(cid) });
+                    break;
+                }
+            }
+        });
+        return candidates[0] || null;
+    }
+
+    /** 联合检索散点：多数据集 2D 嵌入叠加，按库分色背景 */
+    function renderJointScatter(canvasId, jointEmbed, queryCellId, results, queryInput, fallbackQueryId, onCellClick) {
+        destroy(canvasId);
+        const el = document.getElementById(canvasId);
+        if (!el || !jointEmbed?.datasets?.length) return;
+
+        const hitKeys = new Set((results || []).map((r) => `${r.dataset_id}:${r.cell_id}`));
+        const queryRef = resolveJointQuery(jointEmbed, queryCellId, queryInput, fallbackQueryId);
+
+        const datasets = [];
+        (jointEmbed.datasets || []).forEach((d, di) => {
+            const xs = d.umap_x || d.pca_x;
+            const ys = d.umap_y || d.pca_y;
+            const ids = d.cell_ids || [];
+            if (!xs || !ys || !ids.length) return;
+
+            const idxMap = cellIdIndexMap(ids);
+            const bg = [];
+            ids.forEach((id, i) => {
+                const sid = String(id);
+                const key = `${d.dataset_id}:${sid}`;
+                const isQuery = queryRef
+                    && queryRef.dataset_id === d.dataset_id
+                    && queryRef.cell_id === sid;
+                if (!isQuery && !hitKeys.has(key)) {
+                    bg.push({ x: xs[i], y: ys[i] });
+                }
+            });
+            if (bg.length) {
+                datasets.push({
+                    label: d.name || `Dataset #${d.dataset_id}`,
+                    data: bg,
+                    order: 1,
+                    pointRadius: 2.5,
+                    pointBackgroundColor: JOINT_DS_BG[di % JOINT_DS_BG.length],
+                    pointBorderWidth: 0,
+                });
+            }
+        });
+
+        const hits = (results || [])
+            .map((r) => {
+                const ds = (jointEmbed.datasets || []).find((d) => d.dataset_id === r.dataset_id);
+                if (!ds) return null;
+                const xs = ds.umap_x || ds.pca_x;
+                const ys = ds.umap_y || ds.pca_y;
+                const idxMap = cellIdIndexMap(ds.cell_ids || []);
+                const i = idxMap[String(r.cell_id)];
+                if (i === undefined) return null;
+                return {
+                    x: xs[i],
+                    y: ys[i],
+                    label: `#${r.rank} ${r.cell_id}`,
+                    rank: r.rank,
+                    cellId: String(r.cell_id),
+                    datasetId: r.dataset_id,
+                };
+            })
+            .filter(Boolean);
+
+        if (hits.length) {
+            datasets.push({
+                label: 'Top-K 相似细胞',
+                data: hits,
+                order: 2,
+                pointRadius: 9,
+                pointBackgroundColor: hits.map((h) => hitColor(h.rank, hits.length)),
+                pointBorderColor: '#fff',
+                pointBorderWidth: 2,
+            });
+        }
+
+        let titleSuffix = '';
+        if (queryRef) {
+            const ds = (jointEmbed.datasets || []).find((d) => d.dataset_id === queryRef.dataset_id);
+            if (ds) {
+                const xs = ds.umap_x || ds.pca_x;
+                const ys = ds.umap_y || ds.pca_y;
+                const idxMap = cellIdIndexMap(ds.cell_ids || []);
+                const qi = idxMap[queryRef.cell_id];
+                if (qi !== undefined) {
+                    datasets.push({
+                        label: '查询细胞',
+                        data: [{ x: xs[qi], y: ys[qi], label: queryRef.cell_id }],
+                        order: 3,
+                        pointRadius: 11,
+                        pointBackgroundColor: 'rgba(239, 68, 68, 0.45)',
+                        pointBorderColor: '#ef4444',
+                        pointBorderWidth: 2.5,
+                    });
+                }
+            }
+        } else if (queryCellId === 'Vector') {
+            titleSuffix = '（向量检索，无单一查询细胞位置）';
+        }
+
+        charts[canvasId] = new Chart(el.getContext('2d'), {
+            type: 'scatter',
+            data: { datasets },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        position: 'bottom',
+                        labels: {
+                            boxWidth: 12,
+                            usePointStyle: true,
+                            font: { size: 10, weight: '600' },
+                        },
+                    },
+                    title: {
+                        display: true,
+                        text: `联合检索 · ${jointEmbed.source || '2D 嵌入'}（各库独立坐标叠加）${titleSuffix}`,
+                        font: { size: 13, weight: '700' },
+                    },
+                    tooltip: {
+                        callbacks: {
+                            label(ctx) {
+                                const p = ctx.raw;
+                                if (p.label) return p.label;
+                                return `(${p.x.toFixed(2)}, ${p.y.toFixed(2)})`;
+                            },
+                        },
+                    },
+                },
+                scales: {
+                    x: { title: { display: true, text: 'Dim 1' }, grid: { color: 'rgba(0,0,0,0.04)' } },
+                    y: { title: { display: true, text: 'Dim 2' }, grid: { color: 'rgba(0,0,0,0.04)' } },
+                },
+                onClick(evt, elements, chart) {
+                    if (!elements.length || typeof onCellClick !== 'function') return;
+                    const pt = chart.data.datasets[elements[0].datasetIndex].data[elements[0].index];
+                    if (pt.cellId) {
+                        const hit = (results || []).find(
+                            (r) => String(r.cell_id) === pt.cellId && r.dataset_id === pt.datasetId,
+                        );
+                        if (hit) onCellClick(hit);
+                    }
+                },
+            },
+        });
+        charts[canvasId].resize();
+    }
+
     window.SearchViz = {
         destroyAll,
         renderScatter,
+        renderJointScatter,
         renderSimilarityBars,
         renderCellTypeBars,
         renderDistanceBars,
         fetchEmbedData,
+        fetchJointEmbedData,
     };
 })();

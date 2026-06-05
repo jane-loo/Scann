@@ -27,6 +27,7 @@
     <script src="/static/js/api.js"></script>
     <script src="/static/js/search-viz.js"></script>
     <script src="/static/js/cell-compare.js"></script>
+    <script src="/static/js/benchmark-viz.js"></script>
     <script type="text/babel">
         const { useState, useEffect, useMemo } = React;
 
@@ -44,6 +45,13 @@
               btn: 'bg-gradient-to-br from-blue-500 to-indigo-600 border-blue-400 text-white shadow-md shadow-blue-500/25 hover:shadow-lg hover:shadow-blue-500/35' },
             { type: 'ivf_pq',   label: 'IVF-PQ',   lib: 'FAISS',   desc: '倒排 + 乘积量化，省内存',
               btn: 'bg-gradient-to-br from-violet-500 to-fuchsia-600 border-violet-400 text-white shadow-md shadow-violet-500/25 hover:shadow-lg hover:shadow-violet-500/35' },
+        ];
+
+        const TOP_K_OPTIONS = [5, 10, 20, 50];
+        const BENCH_INDEX_ORDER = ['hnsw', 'ivf_flat', 'ivf_pq', 'exact'];
+        const METRIC_OPTIONS = [
+            { value: 'l2', label: 'L2', hint: '欧氏距离 · 默认 ANN 度量' },
+            { value: 'cosine', label: 'Cosine', hint: 'L2 归一化 + 内积 · 方向相似度' },
         ];
 
         const App = () => {
@@ -91,6 +99,21 @@
             const [evalLoading, setEvalLoading] = useState(false);
             const [evalIdxId, setEvalIdxId] = useState('');
 
+            // Joint index
+            const [jointSearchMode, setJointSearchMode] = useState(false);
+            const [selectedJointIdxId, setSelectedJointIdxId] = useState('');
+            const [jointBuildDsIds, setJointBuildDsIds] = useState([]);
+            const [jointBuildType, setJointBuildType] = useState('hnsw');
+            const [buildMetric, setBuildMetric] = useState('l2');
+            const [topK, setTopK] = useState(10);
+
+            // Records (history + eval reports)
+            const [recordsTab, setRecordsTab] = useState('history');
+            const [queryHistory, setQueryHistory] = useState([]);
+            const [evalReports, setEvalReports] = useState([]);
+            const [recordsLoading, setRecordsLoading] = useState(false);
+            const [recordsDsFilter, setRecordsDsFilter] = useState('');
+
             useEffect(() => {
                 ScannAPI.getCurrentUser()
                     .then(u => setUser(u))
@@ -131,13 +154,104 @@
                 datasets.find(d => d.id === Number(selectedDsId)),
             [datasets, selectedDsId]);
 
+            const jointIndices = useMemo(() =>
+                indices.filter(i => i.params?.joint),
+            [indices]);
+
+            const readyJointIndices = useMemo(() =>
+                jointIndices.filter(i => i.status === 'ready'),
+            [jointIndices]);
+
             const currentIndices = useMemo(() => 
-                indices.filter(i => i.dataset_id === Number(selectedDsId)),
+                indices.filter(i => i.dataset_id === Number(selectedDsId) && !i.params?.joint),
             [indices, selectedDsId]);
 
             const readyIndices = useMemo(() => 
                 currentIndices.filter(i => i.status === 'ready'),
             [currentIndices]);
+
+            const datasetNameById = (id) =>
+                datasets.find(d => d.id === Number(id))?.name || `Dataset #${id}`;
+
+            const formatDateTime = (iso) => {
+                if (!iso) return '—';
+                try {
+                    return new Date(iso).toLocaleString('zh-CN', { hour12: false });
+                } catch (e) {
+                    return iso;
+                }
+            };
+
+            const queryTypeLabel = (t) => ({
+                cell_id: 'Cell ID', vector: 'Vector', random: '随机', id: 'Cell ID',
+            }[t] || t || '—');
+
+            const loadRecords = async () => {
+                setRecordsLoading(true);
+                try {
+                    const params = { limit: 50 };
+                    if (recordsDsFilter) params.dataset_id = Number(recordsDsFilter);
+                    const history = await ScannAPI.getQueryHistory(params);
+                    setQueryHistory(Array.isArray(history) ? history : []);
+                    if (isExpert) {
+                        const reports = await ScannAPI.listEvaluationReports(params);
+                        setEvalReports(Array.isArray(reports) ? reports : []);
+                    }
+                } catch (e) {
+                    console.error(e);
+                    if (e?.error) alert(e.error);
+                } finally {
+                    setRecordsLoading(false);
+                }
+            };
+
+            const loadEvalReportsOnly = async () => {
+                if (!isExpert) return;
+                try {
+                    const params = { limit: 30 };
+                    if (selectedDsId) params.dataset_id = Number(selectedDsId);
+                    const reports = await ScannAPI.listEvaluationReports(params);
+                    setEvalReports(Array.isArray(reports) ? reports : []);
+                } catch (e) { console.error(e); }
+            };
+
+            useEffect(() => {
+                if (view === 'records' && isLoggedIn) loadRecords();
+            }, [view, recordsDsFilter, isLoggedIn, isExpert]);
+
+            useEffect(() => {
+                if (view === 'eval' && isExpert) loadEvalReportsOnly();
+            }, [view, selectedDsId, isExpert]);
+
+            const replayHistory = (item) => {
+                setView('search');
+                setJointSearchMode(false);
+                setIndexCompareMode(false);
+                setCompareResults(null);
+                setSearchResults(null);
+                setSelectedDsId(String(item.dataset_id));
+                if (item.query_type === 'vector') {
+                    setSearchType('vec');
+                } else {
+                    setSearchType('id');
+                }
+                setQueryInput(item.query_input || '');
+                const idx = indices.find(i =>
+                    i.dataset_id === item.dataset_id &&
+                    i.index_type === item.index_type &&
+                    i.status === 'ready' &&
+                    !i.params?.joint
+                );
+                if (idx) setSelectedIdxId(idx.id);
+                if (item.top_k) setTopK(Number(item.top_k));
+            };
+
+            const jointIndexLabel = (idx) => {
+                const ids = idx.params?.dataset_ids || [];
+                const names = ids.map(datasetNameById).join(' + ');
+                const cells = idx.params?.total_cells ? ` · ${idx.params.total_cells} cells` : '';
+                return `${idx.index_type.toUpperCase()} · ${names}${cells}`;
+            };
 
             const benchmarkIndices = useMemo(() =>
                 readyIndices.filter(i => i.index_type !== 'exact'),
@@ -150,6 +264,84 @@
             const selectedEvalIndex = useMemo(() =>
                 benchmarkIndices.find(i => String(i.id) === String(evalIdxId)),
             [benchmarkIndices, evalIdxId]);
+
+            const buildBenchmarkChartRows = (batchResults, singleResult) => {
+                const byType = {};
+                (batchResults || []).forEach(r => {
+                    if (r?.index_type) byType[r.index_type] = r;
+                });
+                if (singleResult?.index_type && singleResult.index_type !== 'exact') {
+                    byType[singleResult.index_type] = singleResult;
+                }
+                const exactMs = batchResults?.[0]?.avg_exact_time_ms
+                    || singleResult?.avg_exact_time_ms
+                    || byType.hnsw?.avg_exact_time_ms
+                    || byType.ivf_flat?.avg_exact_time_ms
+                    || byType.ivf_pq?.avg_exact_time_ms;
+                const builtTypes = new Set(
+                    readyIndices.filter(i => i.dataset_id === Number(selectedDsId)).map(i => i.index_type)
+                );
+                return BENCH_INDEX_ORDER.map(type => {
+                    if (type === 'exact') {
+                        return {
+                            index_type: 'exact',
+                            recall_at_k: 1,
+                            speedup: 1,
+                            avg_ann_time_ms: exactMs,
+                            avg_exact_time_ms: exactMs,
+                            present: builtTypes.has('exact') && !!exactMs,
+                        };
+                    }
+                    const r = byType[type];
+                    return {
+                        index_type: type,
+                        recall_at_k: r?.recall_at_k ?? null,
+                        speedup: r?.speedup ?? null,
+                        avg_ann_time_ms: r?.avg_ann_time_ms ?? null,
+                        avg_exact_time_ms: r?.avg_exact_time_ms ?? exactMs,
+                        present: !!r,
+                    };
+                });
+            };
+
+            const benchmarkChartRows = useMemo(() => {
+                if (!evalBatchResults?.length && !evalResult) return null;
+                return buildBenchmarkChartRows(evalBatchResults, evalResult);
+            }, [evalBatchResults, evalResult, readyIndices, selectedDsId]);
+
+            const benchmarkChartSubtitle = useMemo(() => {
+                if (!benchmarkChartRows) return '';
+                const tested = benchmarkChartRows.filter(r => r.present && r.index_type !== 'exact').length;
+                const annBuilt = BENCH_INDEX_ORDER.filter(t => t !== 'exact' && readyIndices.some(
+                    i => i.dataset_id === Number(selectedDsId) && i.index_type === t
+                )).length;
+                if (evalBatchResults?.length >= 3) {
+                    return `已评测 ${tested} 种 ANN · Exact 为 Ground Truth 基线（Recall=100%, 1×）`;
+                }
+                if (evalResult && !evalBatchResults) {
+                    return `当前仅单索引结果 · 点击「评测全部 ANN」补全四索引对比（已构建 ${annBuilt}/3 种 ANN）`;
+                }
+                return `Exact 基线 · 建议构建并评测 HNSW / IVF-Flat / IVF-PQ 三种 ANN`;
+            }, [benchmarkChartRows, evalBatchResults, evalResult, readyIndices, selectedDsId]);
+
+            useEffect(() => {
+                if (view !== 'eval' || !benchmarkChartRows) {
+                    BenchmarkViz.destroyAll();
+                    return;
+                }
+                const dsName = datasets.find(d => String(d.id) === String(selectedDsId))?.name;
+                const timer = requestAnimationFrame(() => {
+                    BenchmarkViz.renderCombined('bench-compare-chart', benchmarkChartRows, {
+                        topK,
+                        datasetName: dsName,
+                        subtitle: benchmarkChartSubtitle,
+                    });
+                });
+                return () => {
+                    cancelAnimationFrame(timer);
+                    BenchmarkViz.destroyAll();
+                };
+            }, [view, benchmarkChartRows, topK, selectedDsId, datasets, benchmarkChartSubtitle]);
 
             useEffect(() => {
                 if (readyIndices.length > 0) setSelectedIdxId(readyIndices[0].id);
@@ -184,6 +376,86 @@
                     setEvalIdxId(benchmarkIndices[0].id);
                 }
             }, [benchmarkIndices, selectedDsId]);
+
+            useEffect(() => {
+                if (readyJointIndices.length === 0) {
+                    setSelectedJointIdxId('');
+                    return;
+                }
+                if (!readyJointIndices.some(i => String(i.id) === String(selectedJointIdxId))) {
+                    setSelectedJointIdxId(readyJointIndices[0].id);
+                }
+            }, [readyJointIndices]);
+
+            useEffect(() => {
+                if (datasets.length >= 2 && jointBuildDsIds.length === 0) {
+                    setJointBuildDsIds(datasets.slice(0, 2).map(d => String(d.id)));
+                }
+            }, [datasets]);
+
+            const normalizeJointSearchResponse = (raw) => {
+                const qin = raw.query_input || '';
+                let queryCellId = 'Vector';
+                if (raw.query_type === 'cell_id' || raw.query_type === 'random') {
+                    queryCellId = qin.includes(':') ? qin.split(':').slice(1).join(':') : qin;
+                }
+                const metaKeys = new Set(['rank', 'dataset_id', 'cell_id', 'distance', 'similarity', 'cell_type', 'dataset_name']);
+                return {
+                    ...raw,
+                    is_joint: true,
+                    query_cell_id: queryCellId,
+                    query_time_ms: raw.query_time_ms,
+                    results: (raw.results || []).map(r => {
+                        const metadata = {};
+                        Object.entries(r).forEach(([k, v]) => {
+                            if (!metaKeys.has(k)) metadata[k] = String(v);
+                        });
+                        return {
+                            ...r,
+                            similarity: 1.0 / (1.0 + Number(r.distance || 0)),
+                            cell_type: r.cell_type,
+                            metadata,
+                            dataset_name: datasetNameById(r.dataset_id),
+                        };
+                    }),
+                };
+            };
+
+            const runJointSearch = async (query_type, query_input) => {
+                if (!selectedJointIdxId) throw { error: '请先在「数据与索引」构建联合索引，或选择 ready 的联合索引' };
+                const body = { query_type, top_k: Number(topK) };
+                if (query_input !== undefined && query_input !== null) body.query_input = query_input;
+                const raw = await ScannAPI.searchJointIndex(Number(selectedJointIdxId), body);
+                return normalizeJointSearchResponse(raw);
+            };
+
+            const toggleJointBuildDs = (id) => {
+                const sid = String(id);
+                setJointBuildDsIds(prev =>
+                    prev.includes(sid) ? prev.filter(x => x !== sid) : [...prev, sid]
+                );
+            };
+
+            const buildJointIdx = async () => {
+                if (jointBuildDsIds.length < 2) return alert('联合索引至少需要选择 2 个数据集');
+                try {
+                    await ScannAPI.buildJointIndex({
+                        dataset_ids: jointBuildDsIds.map(Number),
+                        index_type: jointBuildType,
+                        metric: buildMetric,
+                    });
+                    alert('联合索引构建任务已提交，请稍候刷新状态');
+                    loadAll();
+                } catch (e) { alert(e.error || '联合索引构建失败'); }
+            };
+
+            const deleteJointIdx = async (idxId) => {
+                if (!confirm('确定删除该联合索引？')) return;
+                try {
+                    await ScannAPI.deleteIndex(idxId);
+                    loadAll();
+                } catch (e) { alert(e.error || '删除失败'); }
+            };
 
             const handleLogin = async (e) => {
                 e.preventDefault();
@@ -229,17 +501,36 @@
             }, [view, isSysAdmin]);
 
             useEffect(() => {
-                if (!searchResults || !selectedDsId || !searchResults.results?.length) {
+                if (!searchResults?.results?.length) {
                     setEmbedData(null);
                     SearchViz.destroyAll('sviz-');
                     return;
                 }
                 let cancelled = false;
-                SearchViz.fetchEmbedData(Number(selectedDsId)).then((data) => {
-                    if (!cancelled) setEmbedData(data);
-                }).catch(() => { if (!cancelled) setEmbedData(null); });
+                if (searchResults.is_joint) {
+                    const jointIdx = indices.find(i => String(i.id) === String(selectedJointIdxId));
+                    const dsIds = searchResults.dataset_ids
+                        || jointIdx?.params?.dataset_ids
+                        || [...new Set(searchResults.results.map(r => r.dataset_id))];
+                    SearchViz.fetchJointEmbedData(dsIds).then((data) => {
+                        if (cancelled) return;
+                        setEmbedData({
+                            ...data,
+                            datasets: (data.datasets || []).map(d => ({
+                                ...d,
+                                name: datasetNameById(d.dataset_id),
+                            })),
+                        });
+                    }).catch(() => { if (!cancelled) setEmbedData(null); });
+                } else if (selectedDsId) {
+                    SearchViz.fetchEmbedData(Number(selectedDsId)).then((data) => {
+                        if (!cancelled) setEmbedData(data);
+                    }).catch(() => { if (!cancelled) setEmbedData(null); });
+                } else {
+                    setEmbedData(null);
+                }
                 return () => { cancelled = true; };
-            }, [searchResults, selectedDsId]);
+            }, [searchResults, selectedDsId, selectedJointIdxId, indices, datasets]);
 
             useEffect(() => {
                 if (!searchResults?.results?.length || resultView !== 'viz') return;
@@ -249,11 +540,19 @@
                 requestAnimationFrame(() => {
                     SearchViz.destroyAll('sviz-');
                     if (vizTab === 'scatter' && embedData) {
-                        SearchViz.renderScatter('sviz-scatter', embedData, qid, res, embedData.source, fallbackQ,
-                            (cellId) => {
-                                const hit = res.find((r) => r.cell_id === cellId);
-                                if (hit) openCellCompare(hit);
-                            });
+                        if (searchResults.is_joint) {
+                            SearchViz.renderJointScatter(
+                                'sviz-scatter', embedData, qid, res,
+                                searchResults.query_input, fallbackQ,
+                                (hit) => openCellCompare(hit),
+                            );
+                        } else {
+                            SearchViz.renderScatter('sviz-scatter', embedData, qid, res, embedData.source, fallbackQ,
+                                (cellId) => {
+                                    const hit = res.find((r) => r.cell_id === cellId);
+                                    if (hit) openCellCompare(hit);
+                                });
+                        }
                     } else if (vizTab === 'similarity') {
                         SearchViz.renderSimilarityBars('sviz-similarity', res);
                     } else if (vizTab === 'celltype') {
@@ -271,14 +570,50 @@
                 formData.append('file', file);
                 setUploading(true);
                 try {
-                    await ScannAPI.uploadDataset(formData);
-                    alert("上传成功！正在处理元数据...");
+                    const res = await ScannAPI.uploadDataset(formData);
+                    const v = res.vectorization || res.dataset?.vectorization;
+                    if (res.pca_computed && v) {
+                        alert(`${res.message || '上传成功'}\n\n向量化：${v.pipeline}\n执行方：${v.computed_by || 'Scann'}`);
+                    } else if (v) {
+                        alert(`${res.message || '上传成功'}\n\n使用文件内预置 X_pca（${v.n_components} 维）`);
+                    } else {
+                        alert(res.message || '上传成功！');
+                    }
                     loadAll();
                 } catch (e) { alert(e.error || "上传失败"); }
-                finally { setUploading(false); }
+                finally { setUploading(false); e.target.value = ''; }
+            };
+
+            const vectorizationLabel = (ds) => {
+                const v = ds?.vectorization;
+                if (!v) return `${ds?.n_dims || '?'}D PCA`;
+                if (v.source === 'auto_pca') {
+                    return `系统自动 PCA · ${v.n_components}D`;
+                }
+                return `文件预置 X_pca · ${v.n_components || ds.n_dims}D`;
             };
 
             const runSearch = async () => {
+                if (jointSearchMode) {
+                    if (!selectedJointIdxId) return alert('请先构建并选择联合索引');
+                    setSearchLoading(true);
+                    setSearchResults(null);
+                    setCompareResults(null);
+                    setResultView('viz');
+                    try {
+                        let res;
+                        if (searchType === 'id') {
+                            res = await runJointSearch('cell_id', queryInput.trim());
+                        } else {
+                            let vec;
+                            try { vec = JSON.parse(queryInput); } catch(e) { throw {error: "向量格式不正确，请输入 JSON 数组如 [0.1, 0.2, ...]"}; }
+                            res = await runJointSearch('vector', vec);
+                        }
+                        setSearchResults(res);
+                    } catch (e) { alert(e.error || "联合检索失败"); }
+                    finally { setSearchLoading(false); }
+                    return;
+                }
                 if (indexCompareMode) {
                     try {
                         await runIndexCompare();
@@ -305,7 +640,7 @@
                             dataset_id: Number(selectedDsId),
                             index_id: Number(selectedIdxId),
                             cell_id: queryInput,
-                            top_k: 10,
+                            top_k: Number(topK),
                             filters: searchFilters
                         });
                     } else {
@@ -315,7 +650,7 @@
                             dataset_id: Number(selectedDsId),
                             index_id: Number(selectedIdxId),
                             vector: vec,
-                            top_k: 10,
+                            top_k: Number(topK),
                             filters: searchFilters
                         });
                     }
@@ -325,6 +660,22 @@
             };
 
             const runRandom = async () => {
+                if (jointSearchMode) {
+                    if (!selectedJointIdxId) return alert('请先构建并选择联合索引');
+                    setSearchLoading(true);
+                    setSearchResults(null);
+                    setCompareResults(null);
+                    setResultView('viz');
+                    try {
+                        const res = await runJointSearch('random');
+                        if (!res?.query_cell_id) throw { error: '随机测试未返回有效 Cell ID' };
+                        setQueryInput(res.query_cell_id);
+                        setSearchType('id');
+                        setSearchResults(res);
+                    } catch (e) { alert(e.error || "随机查找失败"); }
+                    finally { setSearchLoading(false); }
+                    return;
+                }
                 if (!selectedIdxId && !indexCompareMode) return;
                 setSearchLoading(true);
                 setSearchResults(null);
@@ -338,7 +689,7 @@
                     const res = await ScannAPI.searchRandom({
                         dataset_id: Number(selectedDsId),
                         index_id: Number(pickIdxId),
-                        top_k: 10,
+                        top_k: Number(topK),
                     });
 
                     if (!res?.query_cell_id) throw { error: '随机测试未返回有效 Cell ID' };
@@ -374,13 +725,13 @@
                         if (cellId) {
                             res = await ScannAPI.searchByCell({
                                 dataset_id: Number(selectedDsId), index_id: Number(idxId),
-                                cell_id: cellId, top_k: 10, filters: searchFilters,
+                                cell_id: cellId, top_k: Number(topK), filters: searchFilters,
                             });
                         } else if (searchType === 'vec') {
                             const vec = JSON.parse(queryInput);
                             res = await ScannAPI.searchByVector({
                                 dataset_id: Number(selectedDsId), index_id: Number(idxId),
-                                vector: vec, top_k: 10, filters: searchFilters,
+                                vector: vec, top_k: Number(topK), filters: searchFilters,
                             });
                         } else {
                             throw { error: '对比模式请使用 Cell ID 或 Vector 检索' };
@@ -402,7 +753,7 @@
                             ? Math.round(100 * r.top_ids.filter(id => baseline.top_ids.includes(id)).length / baseline.top_ids.length)
                             : 0,
                     }));
-                    setCompareResults({ runs: enriched, baseline_type: baseline.index_type, query: cellId || 'Vector' });
+                    setCompareResults({ runs: enriched, baseline_type: baseline.index_type, query: cellId || 'Vector', top_k: Number(topK) });
                 } catch (e) {
                     throw (e && e.error) ? e : { error: '索引对比失败' };
                 }
@@ -422,8 +773,9 @@
                 setEvalLoading(true);
                 setEvalBatchResults(null);
                 try {
-                    const res = await ScannAPI.runEvaluation(selectedDsId, { index_id: Number(evalIdxId) });
+                    const res = await ScannAPI.runEvaluation(selectedDsId, { index_id: Number(evalIdxId), k: Number(topK) });
                     setEvalResult(res);
+                    loadEvalReportsOnly();
                 } catch (e) { alert(e.error || "评测失败"); }
                 finally { setEvalLoading(false); }
             };
@@ -434,19 +786,20 @@
                 setEvalLoading(true);
                 setEvalResult(null);
                 try {
-                    const res = await ScannAPI.runBatchEvaluation(selectedDsId, {});
+                    const res = await ScannAPI.runBatchEvaluation(selectedDsId, { k: Number(topK) });
                     setEvalBatchResults(res.results || []);
                     if (res.results?.length) setEvalResult(res.results[0]);
+                    loadEvalReportsOnly();
                 } catch (e) { alert(e.error || "批量评测失败"); }
                 finally { setEvalLoading(false); }
             };
 
             const buildIdx = async (dsId, type) => {
                 try {
-                    await ScannAPI.buildIndex({ dataset_id: dsId, index_type: type });
-                    alert("任务已提交");
+                    await ScannAPI.buildIndex({ dataset_id: dsId, index_type: type, metric: buildMetric });
+                    alert(`任务已提交 (${buildMetric.toUpperCase()} 度量)`);
                     loadAll();
-                } catch (e) { alert("提交失败"); }
+                } catch (e) { alert(e.error || "提交失败"); }
             };
 
             const resolveQueryCellId = () => {
@@ -468,13 +821,14 @@
             };
 
             const openCellCompare = async (hitResult) => {
-                if (!hitResult || !selectedDsId) return;
+                const dsId = hitResult?.dataset_id || selectedDsId;
+                if (!hitResult || !dsId) return;
                 setCompareHit(hitResult);
                 setCompareOpen(true);
                 setCompareLoading(true);
                 setCompareData(null);
                 try {
-                    const data = await ScannAPI.compareCells(Number(selectedDsId), {
+                    const data = await ScannAPI.compareCells(Number(dsId), {
                         query_cell_id: resolveQueryCellId(),
                         target_cell_id: hitResult.cell_id,
                         search_distance: hitResult.distance,
@@ -510,6 +864,12 @@
                                 <button onClick={()=>setView('datasets')} className={`w-full flex items-center gap-3 p-4 rounded-2xl transition-all ${view==='datasets'?'bg-blue-50 text-blue-600':'text-slate-400 hover:bg-slate-50'}`}>
                                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
                                     <span>数据与索引</span>
+                                </button>
+                            )}
+                            {isLoggedIn && (
+                                <button onClick={()=>setView('records')} className={`w-full flex items-center gap-3 p-4 rounded-2xl transition-all ${view==='records'?'bg-blue-50 text-blue-600':'text-slate-400 hover:bg-slate-50'}`}>
+                                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                                    <span>记录中心</span>
                                 </button>
                             )}
                             {isExpert && (
@@ -577,7 +937,34 @@
                                     <div className="col-span-4 space-y-6">
                                         <section className="card p-6 space-y-4">
                                             <h3 className="text-[10px] font-black uppercase text-slate-400 tracking-widest">1. 环境选择</h3>
+                                            <div className="flex bg-slate-100 p-1 rounded-xl">
+                                                <button type="button" onClick={() => { setJointSearchMode(false); setCompareResults(null); }}
+                                                    className={`flex-1 py-2 rounded-lg text-[10px] font-black uppercase transition-all ${!jointSearchMode ? 'bg-white shadow text-blue-600' : 'text-slate-400'}`}>
+                                                    单库检索
+                                                </button>
+                                                <button type="button" onClick={() => { setJointSearchMode(true); setIndexCompareMode(false); setCompareResults(null); setResultView('viz'); }}
+                                                    className={`flex-1 py-2 rounded-lg text-[10px] font-black uppercase transition-all ${jointSearchMode ? 'bg-white shadow text-purple-600' : 'text-slate-400'}`}>
+                                                    联合检索
+                                                </button>
+                                            </div>
                                             <div className="space-y-3">
+                                                {jointSearchMode ? (
+                                                    <>
+                                                        <select className="w-full p-4 bg-purple-50 rounded-xl font-bold text-sm border border-purple-100 focus:ring-2 ring-purple-500" value={selectedJointIdxId} onChange={e=>setSelectedJointIdxId(e.target.value)}>
+                                                            {readyJointIndices.map(i => (
+                                                                <option key={i.id} value={i.id}>{jointIndexLabel(i)}</option>
+                                                            ))}
+                                                            {readyJointIndices.length === 0 && <option value="">无 ready 联合索引</option>}
+                                                        </select>
+                                                        <p className="text-[9px] text-purple-700 leading-relaxed">
+                                                            跨多个数据集统一 ANN 检索，结果会标注来源数据集。请先在「数据与索引」页构建联合索引。
+                                                        </p>
+                                                        {readyJointIndices.length === 0 && (
+                                                            <p className="text-xs text-amber-600 font-bold">暂无可用联合索引 → 请登录后在「数据与索引」勾选 ≥2 个数据集并构建。</p>
+                                                        )}
+                                                    </>
+                                                ) : (
+                                                    <>
                                                 <select className="w-full p-4 bg-slate-50 rounded-xl font-bold text-sm border-none focus:ring-2 ring-blue-500" value={selectedDsId} onChange={e=>setSelectedDsId(e.target.value)}>
                                                     {datasets.map(d=><option key={d.id} value={d.id}>{d.name}</option>)}
                                                 </select>
@@ -608,6 +995,7 @@
                                                     <input
                                                         type="checkbox"
                                                         checked={indexCompareMode}
+                                                        disabled={jointSearchMode}
                                                         onChange={e => {
                                                             setIndexCompareMode(e.target.checked);
                                                             setCompareResults(null);
@@ -616,11 +1004,27 @@
                                                         className="rounded border-slate-300"
                                                     />
                                                     <span className="text-xs font-black text-slate-700">索引对比模式</span>
-                                                    <span className="text-[9px] text-slate-400">并行检索，对比耗时与 Top-10 重叠率</span>
+                                                    <span className="text-[9px] text-slate-400">并行检索，对比耗时与 Top-{topK} 重叠率</span>
                                                 </label>
+                                                    </>
+                                                )}
+                                                <div className="flex items-center justify-between p-3 bg-slate-50 rounded-xl border border-slate-100">
+                                                    <div>
+                                                        <span className="text-[10px] font-black uppercase text-slate-400 block">Top-K</span>
+                                                        <span className="text-[9px] text-slate-400">ANN 返回最近邻数量 · 影响 Recall 与延迟</span>
+                                                    </div>
+                                                    <select
+                                                        className="p-2 bg-white rounded-lg font-black text-sm border border-slate-200 min-w-[4.5rem]"
+                                                        value={topK}
+                                                        onChange={e => setTopK(Number(e.target.value))}
+                                                    >
+                                                        {TOP_K_OPTIONS.map(k => <option key={k} value={k}>{k}</option>)}
+                                                    </select>
+                                                </div>
                                             </div>
                                         </section>
 
+                                        {!jointSearchMode && (
                                         <section className="card p-6 space-y-4">
                                             <div className="flex justify-between items-center">
                                                 <h3 className="text-[10px] font-black uppercase text-slate-400 tracking-widest">2. 元数据过滤 (多重)</h3>
@@ -674,11 +1078,12 @@
                                                 <p className="text-[9px] text-slate-400 italic">点 + 号添加多个过滤条件，它们将以 AND 逻辑共同作用。</p>
                                             </div>
                                         </section>
+                                        )}
 
-                                        <button onClick={runSearch} disabled={searchLoading || (indexCompareMode ? readyIndices.length < 2 : !selectedIdxId)} className="w-full py-5 btn-primary rounded-3xl font-black text-lg shadow-xl shadow-blue-500/20 flex items-center justify-center gap-3 disabled:opacity-30">
-                                            {searchLoading ? <div className="spinner !border-white"></div> : (indexCompareMode ? '执行多索引对比' : '执行检索引擎')}
+                                        <button onClick={runSearch} disabled={searchLoading || (jointSearchMode ? !selectedJointIdxId : (indexCompareMode ? readyIndices.length < 2 : !selectedIdxId))} className="w-full py-5 btn-primary rounded-3xl font-black text-lg shadow-xl shadow-blue-500/20 flex items-center justify-center gap-3 disabled:opacity-30">
+                                            {searchLoading ? <div className="spinner !border-white"></div> : (jointSearchMode ? '执行联合检索' : (indexCompareMode ? '执行多索引对比' : '执行检索引擎'))}
                                         </button>
-                                        <button onClick={runRandom} disabled={searchLoading || (indexCompareMode ? readyIndices.length < 2 : !selectedIdxId)} className="w-full py-4 bg-white border-2 border-slate-900 rounded-3xl font-black text-slate-900 hover:bg-slate-50 transition-all">🎲 随机测试</button>
+                                        <button onClick={runRandom} disabled={searchLoading || (jointSearchMode ? !selectedJointIdxId : (indexCompareMode ? readyIndices.length < 2 : !selectedIdxId))} className="w-full py-4 bg-white border-2 border-slate-900 rounded-3xl font-black text-slate-900 hover:bg-slate-50 transition-all">🎲 随机测试</button>
                                     </div>
 
                                     <div className="col-span-8 flex flex-col space-y-6">
@@ -700,7 +1105,7 @@
                                                     <div className="flex flex-wrap justify-between items-center gap-4 border-b pb-6">
                                                         <div>
                                                             <h4 className="font-black text-xl italic underline decoration-purple-500 decoration-4">INDEX COMPARE</h4>
-                                                            <p className="text-xs text-slate-500 mt-1">查询: <strong>{compareResults.query}</strong> · 基线: <strong className="uppercase">{compareResults.baseline_type}</strong> Top-10</p>
+                                                            <p className="text-xs text-slate-500 mt-1">查询: <strong>{compareResults.query}</strong> · 基线: <strong className="uppercase">{compareResults.baseline_type}</strong> Top-{compareResults.top_k || topK}</p>
                                                         </div>
                                                     </div>
                                                     <div className="overflow-x-auto">
@@ -709,7 +1114,7 @@
                                                                 <tr>
                                                                     <th className="text-left p-3">索引类型</th>
                                                                     <th className="text-left p-3">耗时 (ms)</th>
-                                                                    <th className="text-left p-3">Top-10 重叠</th>
+                                                                    <th className="text-left p-3">Top-{compareResults.top_k || topK} 重叠</th>
                                                                     <th className="text-left p-3">相对基线</th>
                                                                     <th className="text-left p-3">加速比</th>
                                                                 </tr>
@@ -728,7 +1133,7 @@
                                                                             <tr key={r.index_id} className={`border-t border-slate-100 ${isBaseline ? 'bg-green-50/50' : ''}`}>
                                                                                 <td className="p-3 font-black uppercase">{r.index_type}{isBaseline ? ' (基线)' : ''}</td>
                                                                                 <td className="p-3 font-bold text-blue-600">{(r.query_time_ms || 0).toFixed(2)}</td>
-                                                                                <td className="p-3">{r.overlap_with_baseline}/10</td>
+                                                                                <td className="p-3">{r.overlap_with_baseline}/{compareResults.top_k || topK}</td>
                                                                                 <td className="p-3">
                                                                                     <span className={`px-2 py-1 rounded-lg text-xs font-black ${r.overlap_pct >= 90 ? 'bg-green-100 text-green-700' : r.overlap_pct >= 70 ? 'bg-yellow-100 text-yellow-700' : 'bg-red-100 text-red-700'}`}>
                                                                                         {isBaseline ? '100%' : `${r.overlap_pct}%`}
@@ -742,7 +1147,7 @@
                                                         </table>
                                                     </div>
                                                     <p className="text-[10px] text-slate-400 leading-relaxed">
-                                                        重叠率 = 该索引 Top-10 细胞 ID 与 {compareResults.baseline_type} 基线的交集占比。无 exact 索引时以第一个参与对比的索引为基线。
+                                                        重叠率 = 该索引 Top-{compareResults.top_k || topK} 细胞 ID 与 {compareResults.baseline_type} 基线的交集占比。无 exact 索引时以第一个参与对比的索引为基线。
                                                     </p>
                                                 </div>
                                             ) : !searchResults ? (
@@ -753,8 +1158,11 @@
                                             ) : (
                                                 <div className="space-y-6">
                                                     <div className="flex flex-wrap justify-between items-center gap-4 border-b pb-6">
-                                                        <div className="flex items-center gap-2">
+                                                        <div className="flex items-center gap-2 flex-wrap">
                                                             <h4 className="font-black text-xl italic underline decoration-blue-500 decoration-4 mr-4">RESULT SET</h4>
+                                                            {searchResults.is_joint && (
+                                                                <span className="px-3 py-1 rounded-full text-[10px] font-black uppercase bg-purple-100 text-purple-700">联合检索</span>
+                                                            )}
                                                             <div className="flex bg-slate-100 p-1 rounded-xl">
                                                                 <button onClick={()=>setResultView('viz')} className={`px-4 py-2 rounded-lg text-[10px] font-black uppercase ${resultView==='viz'?'bg-white shadow text-blue-600':'text-slate-400'}`}>可视化</button>
                                                                 <button onClick={()=>setResultView('list')} className={`px-4 py-2 rounded-lg text-[10px] font-black uppercase ${resultView==='list'?'bg-white shadow text-blue-600':'text-slate-400'}`}>详细列表</button>
@@ -771,12 +1179,27 @@
                                                             <p className="text-xs text-red-400 mt-2 font-bold uppercase">Tips: 检查你的 Value 是否与该数据集中存在的标签完全一致。</p>
                                                         </div>
                                                     )}
+                                                    {searchResults.is_joint && searchResults.results.length > 0 && resultView === 'list' && (
+                                                        <p className="text-xs text-purple-700 bg-purple-50 border border-purple-100 rounded-2xl p-4">
+                                                            结果来自多个数据集，列表中紫色标签为来源库。Cell ID 需在任一参与联合的数据集中存在。
+                                                        </p>
+                                                    )}
                                                     {searchResults.results.length > 0 && resultView === 'viz' && (
                                                         <div className="space-y-4">
                                                             <p className="text-xs text-slate-500 leading-relaxed">
-                                                                高维向量（如 30 维 PCA）无法直接画图，这里用 <strong>2D 嵌入</strong>（UMAP 或 PCA 前两维）投影到平面：
-                                                                灰色小点为背景细胞，<span className="text-red-500 font-bold">红色大圆环</span> 为查询细胞，彩色圆点为 Top-K 邻居。
-                                                                <strong>点击彩色邻居点</strong>可查看与查询细胞的详细对比。
+                                                                {searchResults.is_joint ? (
+                                                                    <>
+                                                                        联合检索结果来自多个数据集，散点图将<strong>各库 2D 嵌入（UMAP/PCA）</strong>叠加展示：
+                                                                        淡色背景按来源库区分，<span className="text-red-500 font-bold">红圈</span>为查询细胞，彩色点为 Top-K 邻居。
+                                                                        相似度/距离/类型分布图对跨库结果同样适用。
+                                                                    </>
+                                                                ) : (
+                                                                    <>
+                                                                        高维向量（如 30 维 PCA）无法直接画图，这里用 <strong>2D 嵌入</strong>（UMAP 或 PCA 前两维）投影到平面：
+                                                                        灰色小点为背景细胞，<span className="text-red-500 font-bold">红色大圆环</span> 为查询细胞，彩色圆点为 Top-K 邻居。
+                                                                        <strong>点击彩色邻居点</strong>可查看与查询细胞的详细对比。
+                                                                    </>
+                                                                )}
                                                             </p>
                                                             <div className="flex flex-wrap gap-2">
                                                                 {[
@@ -786,7 +1209,7 @@
                                                                     ['celltype', '类型分布'],
                                                                 ].map(([k, label]) => (
                                                                     <button key={k} onClick={()=>setVizTab(k)}
-                                                                        className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase border-2 transition-all ${vizTab===k?'border-blue-600 bg-blue-50 text-blue-600':'border-slate-200 text-slate-400 hover:border-slate-300'}`}>
+                                                                        className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase border-2 transition-all ${vizTab===k ? (searchResults.is_joint ? 'border-purple-600 bg-purple-50 text-purple-600' : 'border-blue-600 bg-blue-50 text-blue-600') : (searchResults.is_joint ? 'border-purple-200 text-slate-400 hover:border-purple-300' : 'border-slate-200 text-slate-400 hover:border-slate-300')}`}>
                                                                         {label}
                                                                     </button>
                                                                 ))}
@@ -813,12 +1236,18 @@
                                                                 <div className="flex justify-between items-start mb-4">
                                                                     <div>
                                                                         <p className="text-lg font-black text-slate-900">#{r.rank} {r.cell_id}</p>
-                                                                        <p className="text-xs font-bold text-blue-600 uppercase">{r.cell_type || 'Unknown Type'}</p>
+                                                                        {r.dataset_name && (
+                                                                            <span className="inline-block mt-1 px-2 py-0.5 rounded-md bg-purple-100 text-purple-700 text-[9px] font-black uppercase">{r.dataset_name}</span>
+                                                                        )}
+                                                                        <p className="text-xs font-bold text-blue-600 uppercase mt-1">{r.cell_type || 'Unknown Type'}</p>
                                                                         <p className="text-[9px] text-slate-400 mt-1 font-bold">点击展开对比详情 →</p>
                                                                     </div>
                                                                     <div className="text-right">
-                                                                        <p className="text-2xl font-black text-slate-900">{(r.similarity*100).toFixed(2)}%</p>
+                                                                        <p className="text-2xl font-black text-slate-900">{((r.similarity || 0)*100).toFixed(2)}%</p>
                                                                         <p className="text-[10px] font-black text-slate-400 uppercase">Similarity</p>
+                                                                        {r.distance != null && (
+                                                                            <p className="text-[9px] text-slate-400 mt-1">L2: {Number(r.distance).toFixed(4)}</p>
+                                                                        )}
                                                                     </div>
                                                                 </div>
                                                                 <div className="flex flex-wrap gap-2 pt-4 border-t border-slate-200/50">
@@ -840,12 +1269,153 @@
                             </div>
                         )}
 
+                        {view === 'records' && isLoggedIn && (
+                            <div className="max-w-6xl mx-auto space-y-8">
+                                <header className="flex flex-wrap justify-between items-end gap-4">
+                                    <div>
+                                        <h2 className="text-3xl font-black tracking-tight">记录中心</h2>
+                                        <p className="text-slate-400 font-medium">查询历史与 Benchmark 评测报告，支持一键重跑检索</p>
+                                    </div>
+                                    <div className="flex flex-wrap items-center gap-3">
+                                        <select
+                                            className="p-3 bg-white rounded-xl font-bold text-sm border border-slate-200 min-w-[180px]"
+                                            value={recordsDsFilter}
+                                            onChange={e => setRecordsDsFilter(e.target.value)}
+                                        >
+                                            <option value="">全部数据集</option>
+                                            {datasets.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+                                        </select>
+                                        <button onClick={loadRecords} disabled={recordsLoading}
+                                            className="px-5 py-3 bg-slate-900 text-white rounded-xl text-xs font-black uppercase hover:bg-slate-800 disabled:opacity-50">
+                                            {recordsLoading ? '刷新中…' : '刷新'}
+                                        </button>
+                                    </div>
+                                </header>
+
+                                <div className="flex bg-white p-1 rounded-xl border shadow-sm w-fit">
+                                    <button type="button" onClick={() => setRecordsTab('history')}
+                                        className={`px-6 py-2 rounded-lg text-xs font-black uppercase transition-all ${recordsTab === 'history' ? 'bg-slate-900 text-white' : 'text-slate-400'}`}>
+                                        查询历史
+                                    </button>
+                                    {isExpert && (
+                                        <button type="button" onClick={() => setRecordsTab('eval')}
+                                            className={`px-6 py-2 rounded-lg text-xs font-black uppercase transition-all ${recordsTab === 'eval' ? 'bg-blue-600 text-white' : 'text-slate-400'}`}>
+                                            评测报告
+                                        </button>
+                                    )}
+                                </div>
+
+                                {recordsTab === 'history' && (
+                                    <div className="card overflow-hidden">
+                                        {recordsLoading ? (
+                                            <div className="p-16 text-center text-slate-400 font-bold">加载中…</div>
+                                        ) : queryHistory.length === 0 ? (
+                                            <div className="p-16 text-center">
+                                                <p className="text-slate-400 font-bold">暂无查询记录</p>
+                                                <p className="text-xs text-slate-400 mt-2">登录后执行的检索会自动记录（访客检索不写入历史）</p>
+                                            </div>
+                                        ) : (
+                                            <div className="overflow-x-auto">
+                                                <table className="w-full text-sm">
+                                                    <thead className="bg-slate-50 text-[10px] font-black uppercase text-slate-400">
+                                                        <tr>
+                                                            <th className="text-left p-4">时间</th>
+                                                            <th className="text-left p-4">数据集</th>
+                                                            <th className="text-left p-4">类型</th>
+                                                            <th className="text-left p-4">查询</th>
+                                                            <th className="text-left p-4">索引</th>
+                                                            <th className="text-left p-4">耗时</th>
+                                                            <th className="text-left p-4">Top 结果</th>
+                                                            <th className="text-left p-4">操作</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        {queryHistory.map(h => (
+                                                            <tr key={h.id} className="border-t border-slate-100 hover:bg-slate-50/80">
+                                                                <td className="p-4 text-xs text-slate-500 whitespace-nowrap">{formatDateTime(h.created_at)}</td>
+                                                                <td className="p-4 font-bold text-xs">{datasetNameById(h.dataset_id)}</td>
+                                                                <td className="p-4">
+                                                                    <span className="px-2 py-1 rounded-lg bg-slate-100 text-[10px] font-black uppercase">{queryTypeLabel(h.query_type)}</span>
+                                                                </td>
+                                                                <td className="p-4 max-w-[200px] truncate font-mono text-xs" title={h.query_input}>{h.query_input || '—'}</td>
+                                                                <td className="p-4 text-xs font-black uppercase">{h.index_type}</td>
+                                                                <td className="p-4 text-blue-600 font-bold text-xs">{h.query_time != null ? `${Number(h.query_time).toFixed(2)} ms` : '—'}</td>
+                                                                <td className="p-4 text-[10px] text-slate-500 max-w-[160px] truncate" title={(h.result_ids || []).join(', ')}>
+                                                                    {(h.result_ids || []).slice(0, 3).join(', ')}{(h.result_ids || []).length > 3 ? '…' : ''}
+                                                                </td>
+                                                                <td className="p-4">
+                                                                    <button type="button" onClick={() => replayHistory(h)}
+                                                                        className="px-3 py-1.5 rounded-lg bg-blue-50 text-blue-700 text-[10px] font-black uppercase hover:bg-blue-100">
+                                                                        重跑
+                                                                    </button>
+                                                                </td>
+                                                            </tr>
+                                                        ))}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+
+                                {recordsTab === 'eval' && isExpert && (
+                                    <div className="card overflow-hidden">
+                                        {recordsLoading ? (
+                                            <div className="p-16 text-center text-slate-400 font-bold">加载中…</div>
+                                        ) : evalReports.length === 0 ? (
+                                            <div className="p-16 text-center">
+                                                <p className="text-slate-400 font-bold">暂无评测报告</p>
+                                                <p className="text-xs text-slate-400 mt-2">在「性能标测器」中运行 Benchmark 后会自动生成报告</p>
+                                            </div>
+                                        ) : (
+                                            <div className="overflow-x-auto">
+                                                <table className="w-full text-sm">
+                                                    <thead className="bg-slate-50 text-[10px] font-black uppercase text-slate-400">
+                                                        <tr>
+                                                            <th className="text-left p-4">时间</th>
+                                                            <th className="text-left p-4">数据集</th>
+                                                            <th className="text-left p-4">索引</th>
+                                                            <th className="text-left p-4">Recall@K</th>
+                                                            <th className="text-left p-4">QPS</th>
+                                                            <th className="text-left p-4">ANN 延迟</th>
+                                                            <th className="text-left p-4">采样</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        {evalReports.map(r => (
+                                                            <tr key={r.id} className="border-t border-slate-100 hover:bg-slate-50/80">
+                                                                <td className="p-4 text-xs text-slate-500 whitespace-nowrap">{formatDateTime(r.created_at)}</td>
+                                                                <td className="p-4 font-bold text-xs">{r.dataset_name || datasetNameById(r.dataset_id)}</td>
+                                                                <td className="p-4 font-black uppercase text-xs">{r.index_type}</td>
+                                                                <td className="p-4">
+                                                                    <span className={`px-2 py-1 rounded-lg text-xs font-black ${(r.recall_at_k || 0) >= 0.9 ? 'bg-green-100 text-green-700' : (r.recall_at_k || 0) >= 0.7 ? 'bg-yellow-100 text-yellow-700' : 'bg-red-100 text-red-700'}`}>
+                                                                        {((r.recall_at_k || 0) * 100).toFixed(1)}%
+                                                                    </span>
+                                                                </td>
+                                                                <td className="p-4 font-bold text-xs">{(r.qps || 0).toFixed(1)}</td>
+                                                                <td className="p-4 text-blue-600 font-bold text-xs">{(r.avg_latency_ms || 0).toFixed(2)} ms</td>
+                                                                <td className="p-4 text-xs text-slate-500">{r.n_queries} × K={r.k}</td>
+                                                            </tr>
+                                                        ))}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
                         {view === 'datasets' && (
                             <div className="max-w-6xl mx-auto space-y-8">
                                 <header className="flex justify-between items-center">
                                     <div>
                                         <h2 className="text-3xl font-black tracking-tight">库与索引管理</h2>
                                         <p className="text-slate-400 font-medium">数据集生命周期及 ANN 索引健康度控制</p>
+                                        <p className="text-[11px] text-slate-400 mt-2 max-w-xl leading-relaxed">
+                                            上传 .h5ad 时优先使用 <code className="text-slate-500">obsm.X_pca</code>；若无 PCA，系统将自动执行
+                                            normalize → log1p → HVG → PCA（Scanpy），并写回文件供索引构建与检索。
+                                        </p>
                                     </div>
                                     <label className="flex items-center gap-3 px-6 py-4 bg-white border-2 border-dashed border-blue-200 rounded-2xl cursor-pointer hover:border-blue-500 transition-all">
                                         <input type="file" className="hidden" onChange={handleUpload} disabled={uploading} />
@@ -854,19 +1424,61 @@
                                     </label>
                                 </header>
 
+                                <section className="card p-6 border border-slate-100 bg-slate-50/50">
+                                    <div className="flex flex-wrap justify-between items-start gap-4">
+                                        <div>
+                                            <h3 className="text-sm font-black uppercase tracking-widest text-slate-500">索引构建参数</h3>
+                                            <p className="text-xs text-slate-400 mt-1 max-w-xl">距离度量在构建时写入索引文件，L2 与 Cosine 需分别构建；检索时 Top-K 在检索页可调。</p>
+                                        </div>
+                                        <div className="flex bg-white p-1 rounded-xl border border-slate-200 shadow-sm">
+                                            {METRIC_OPTIONS.map(m => (
+                                                <button
+                                                    key={m.value}
+                                                    type="button"
+                                                    onClick={() => setBuildMetric(m.value)}
+                                                    className={`px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all ${buildMetric === m.value ? 'bg-slate-900 text-white shadow' : 'text-slate-400 hover:text-slate-600'}`}
+                                                    title={m.hint}
+                                                >
+                                                    {m.label}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                    <p className="text-[10px] text-slate-400 mt-3 font-medium">
+                                        当前度量：<strong className="text-slate-600">{METRIC_OPTIONS.find(m => m.value === buildMetric)?.hint}</strong>
+                                    </p>
+                                </section>
+
+                                <section className="space-y-6">
+                                    <div>
+                                        <h3 className="text-xl font-black tracking-tight">单库索引</h3>
+                                        <p className="text-sm text-slate-500 mt-1">为每个数据集分别构建 HNSW / Exact / IVF-Flat / IVF-PQ，供单库检索与 Benchmark 使用。</p>
+                                    </div>
+                                    {datasets.length === 0 ? (
+                                        <div className="card p-12 text-center text-slate-400">
+                                            <p className="font-black text-sm uppercase">暂无数据集</p>
+                                            <p className="text-xs mt-2">请先上传 .h5ad 文件</p>
+                                        </div>
+                                    ) : (
                                 <div className="grid grid-cols-2 gap-8">
                                     {datasets.map(ds=>(
                                         <div key={ds.id} className="card p-8 group hover:shadow-xl transition-shadow relative overflow-hidden">
                                             <div className="absolute top-0 right-0 w-32 h-32 bg-blue-50 rounded-full -mr-16 -mt-16 group-hover:bg-blue-100 transition-colors"></div>
                                             <div className="relative">
                                                 <h3 className="text-2xl font-black mb-1">{ds.name}</h3>
-                                                <p className="text-xs font-bold text-slate-400 mb-6 flex items-center gap-2">
+                                                <p className="text-xs font-bold text-slate-400 mb-2 flex items-center gap-2 flex-wrap">
                                                     <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path d="M7 3a1 1 0 000 2h6a1 1 0 100-2H7zM4 7a1 1 0 011-1h10a1 1 0 110 2H5a1 1 0 01-1-1zM2 11a2 2 0 012-2h12a2 2 0 012 2v4a2 2 0 01-2 2H4a2 2 0 01-2-2v-4z"/></svg>
-                                                    {ds.n_cells?.toLocaleString() || 0} CELLS
+                                                    {ds.n_cells?.toLocaleString() || 0} CELLS · {ds.n_genes?.toLocaleString() || 0} GENES
+                                                </p>
+                                                <p className={`text-[10px] font-black uppercase mb-6 inline-flex px-2.5 py-1 rounded-lg ${ds.vector_source === 'auto_pca' ? 'bg-amber-50 text-amber-700 border border-amber-100' : 'bg-emerald-50 text-emerald-700 border border-emerald-100'}`}
+                                                    title={ds.vectorization?.pipeline || ''}>
+                                                    {vectorizationLabel(ds)}
                                                 </p>
                                                 
                                                 <div className="space-y-3 mb-8">
-                                                    {indices.filter(i=>i.dataset_id===ds.id).map(i=>(
+                                                    {indices.filter(i=>i.dataset_id===ds.id && !i.params?.joint).length === 0 ? (
+                                                        <p className="text-[10px] text-slate-400 font-medium p-4 bg-slate-50 rounded-2xl border border-dashed border-slate-200">尚未构建索引，点击下方按钮开始</p>
+                                                    ) : indices.filter(i=>i.dataset_id===ds.id && !i.params?.joint).map(i=>(
                                                         <div key={i.id} className="flex justify-between items-start gap-3 p-4 bg-slate-50 rounded-2xl border border-slate-100">
                                                             <div className="min-w-0">
                                                                 <p className="font-black text-xs uppercase">{i.index_type} 索引</p>
@@ -882,22 +1494,23 @@
 
                                                 <div className="grid grid-cols-2 gap-3">
                                                     {INDEX_TYPES.map(t => {
-                                                        const existing = indices.filter(i => i.dataset_id === ds.id && i.index_type === t.type);
+                                                        const existing = indices.filter(i => i.dataset_id === ds.id && i.index_type === t.type && !i.params?.joint);
                                                         const rec = existing.find(i => i.status === 'ready' || i.status === 'building' || i.status === 'error') || existing[0];
                                                         const building = existing.some(i => i.status === 'building');
-                                                        const ready = existing.some(i => i.status === 'ready');
-                                                        const errored = rec?.status === 'error';
+                                                        const ready = existing.some(i => i.status === 'ready' && i.metric === buildMetric);
+                                                        const errored = rec?.status === 'error' && rec?.metric === buildMetric;
                                                         return (
                                                             <button
                                                                 key={t.type}
                                                                 onClick={() => buildIdx(ds.id, t.type)}
                                                                 disabled={building}
-                                                                title={errored && rec?.params?._error ? rec.params._error : `${t.desc} · ${t.lib}`}
+                                                                title={errored && rec?.params?._error ? rec.params._error : `${t.desc} · ${t.lib} · ${buildMetric.toUpperCase()}`}
                                                                 className={`relative overflow-hidden rounded-2xl border-2 px-4 py-3.5 text-left transition-all duration-200 hover:-translate-y-0.5 active:translate-y-0 disabled:opacity-60 disabled:hover:translate-y-0 ${t.btn}`}
                                                             >
                                                                 <span className="block text-[9px] font-bold uppercase tracking-widest opacity-75">{t.lib}</span>
                                                                 <span className="block text-sm font-black mt-0.5">{building ? '构建中…' : t.label}</span>
                                                                 <span className="block text-[9px] font-medium mt-1 opacity-80 leading-snug">{t.desc}</span>
+                                                                <span className="block text-[8px] font-bold mt-1 opacity-70 uppercase tracking-wider">{buildMetric}</span>
                                                                 {ready && !building && (
                                                                     <span className="absolute top-2.5 right-2.5 w-2 h-2 rounded-full bg-white/90 ring-2 ring-white/40" title="已就绪" />
                                                                 )}
@@ -913,14 +1526,94 @@
                                         </div>
                                     ))}
                                 </div>
+                                    )}
+                                </section>
+
+                                <section className="card p-8 border border-slate-200 bg-white">
+                                    <div className="flex flex-wrap justify-between items-start gap-4 mb-6">
+                                        <div>
+                                            <h3 className="text-xl font-black">联合索引</h3>
+                                            <p className="text-sm text-slate-500 mt-2 max-w-xl">将多个数据集的向量合并为统一 ANN 索引，支持跨库检索。至少选择 2 个数据集，维度需一致。</p>
+                                        </div>
+                                    </div>
+
+                                    <div className="grid grid-cols-2 gap-6 mb-6">
+                                        {datasets.map(ds => (
+                                            <label key={`joint-${ds.id}`} className={`flex items-start gap-3 p-4 rounded-2xl border-2 cursor-pointer transition-all ${jointBuildDsIds.includes(String(ds.id)) ? 'border-purple-400 bg-purple-50/50 shadow-sm' : 'border-slate-100 bg-slate-50/50 hover:border-purple-200'}`}>
+                                                <input
+                                                    type="checkbox"
+                                                    className="mt-1 rounded border-slate-300"
+                                                    checked={jointBuildDsIds.includes(String(ds.id))}
+                                                    onChange={() => toggleJointBuildDs(ds.id)}
+                                                />
+                                                <div>
+                                                    <p className="font-black text-sm">{ds.name}</p>
+                                                    <p className="text-[10px] text-slate-400 font-bold">{ds.n_cells?.toLocaleString()} cells · {ds.n_dims} dims</p>
+                                                </div>
+                                            </label>
+                                        ))}
+                                    </div>
+
+                                    <div className="flex flex-wrap items-end gap-4 mb-8">
+                                        <div>
+                                            <label className="text-[10px] font-black text-slate-400 uppercase block mb-2">索引类型</label>
+                                            <select className="p-3 bg-white rounded-xl font-bold text-sm border border-slate-200 uppercase" value={jointBuildType} onChange={e => setJointBuildType(e.target.value)}>
+                                                {INDEX_TYPES.map(t => <option key={t.type} value={t.type}>{t.label}</option>)}
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label className="text-[10px] font-black text-slate-400 uppercase block mb-2">距离度量</label>
+                                            <select className="p-3 bg-white rounded-xl font-bold text-sm border border-slate-200 uppercase" value={buildMetric} onChange={e => setBuildMetric(e.target.value)}>
+                                                {METRIC_OPTIONS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+                                            </select>
+                                        </div>
+                                        <button onClick={buildJointIdx} disabled={jointBuildDsIds.length < 2 || datasets.length < 2}
+                                            className="px-8 py-3 bg-gradient-to-r from-purple-600 to-fuchsia-600 text-white rounded-2xl font-black text-sm shadow-lg shadow-purple-500/25 hover:shadow-xl disabled:opacity-50 transition-all">
+                                            构建联合索引
+                                        </button>
+                                        <span className="text-[10px] text-slate-400 font-bold">已选 {jointBuildDsIds.length} / {datasets.length} 个数据集</span>
+                                    </div>
+
+                                    {jointIndices.length > 0 && (
+                                        <div className="space-y-3 border-t border-slate-100 pt-6">
+                                            <h4 className="text-[10px] font-black uppercase text-slate-400 tracking-widest">已有联合索引</h4>
+                                            {jointIndices.map(i => (
+                                                <div key={i.id} className="flex flex-wrap justify-between items-start gap-3 p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                                                    <div className="min-w-0">
+                                                        <p className="font-black text-sm">{jointIndexLabel(i)}</p>
+                                                        <p className="text-[10px] text-slate-400 mt-1">
+                                                            ID #{i.id} · {i.metric} · 含数据集: {(i.params?.dataset_ids || []).map(datasetNameById).join(', ')}
+                                                        </p>
+                                                        {i.status === 'error' && i.params?._error && (
+                                                            <p className="text-[10px] text-red-500 mt-1">{i.params._error}</p>
+                                                        )}
+                                                    </div>
+                                                    <div className="flex items-center gap-2 shrink-0">
+                                                        <span className={`px-3 py-1 rounded-full text-[10px] font-black uppercase ${i.status==='ready'?'bg-green-100 text-green-600':i.status==='error'?'bg-red-100 text-red-600':'bg-yellow-100 text-yellow-600'}`}>{i.status}</span>
+                                                        {i.status === 'ready' && (
+                                                            <button type="button" onClick={() => { setJointSearchMode(true); setSelectedJointIdxId(i.id); setView('search'); }}
+                                                                className="px-3 py-1 rounded-lg bg-purple-100 text-purple-700 text-[10px] font-black uppercase hover:bg-purple-200">
+                                                                去检索
+                                                            </button>
+                                                        )}
+                                                        <button type="button" onClick={() => deleteJointIdx(i.id)}
+                                                            className="px-3 py-1 rounded-lg bg-slate-100 text-slate-500 text-[10px] font-black uppercase hover:bg-red-50 hover:text-red-600">
+                                                            删除
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </section>
                             </div>
                         )}
 
                         {view === 'eval' && (
-                            <div className="max-w-4xl mx-auto space-y-8">
+                            <div className="max-w-5xl mx-auto space-y-8">
                                 <div className="text-center">
                                     <h2 className="text-4xl font-black italic tracking-tighter uppercase">Benchmarking</h2>
-                                    <p className="text-slate-400 font-bold">以 Exact 为基线，对比各 ANN 索引的加速比与 Recall@10</p>
+                                    <p className="text-slate-400 font-bold">以 Exact 为基线，对比各 ANN 索引的加速比与 Recall@{topK}</p>
                                 </div>
 
                                 <div className="card p-10 bg-white shadow-2xl relative overflow-hidden space-y-8">
@@ -964,8 +1657,24 @@
                                             待测：<strong className="uppercase text-blue-600">{selectedEvalIndex?.index_type || '—'}</strong>
                                             {' · '}
                                             共 {benchmarkIndices.length} 个 ANN 索引可评测
+                                            {' · '}
+                                            K = {topK}
                                         </p>
                                     )}
+
+                                    <div className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                                        <div>
+                                            <span className="text-[10px] font-black uppercase text-slate-400 block">评测 Top-K</span>
+                                            <span className="text-[9px] text-slate-400">Recall@K 与检索页 Top-K 同步，K 越大召回越高但 ANN 开销略增</span>
+                                        </div>
+                                        <select
+                                            className="p-2 bg-white rounded-xl font-black text-sm border border-slate-200"
+                                            value={topK}
+                                            onChange={e => { setTopK(Number(e.target.value)); setEvalResult(null); setEvalBatchResults(null); }}
+                                        >
+                                            {TOP_K_OPTIONS.map(k => <option key={k} value={k}>{k}</option>)}
+                                        </select>
+                                    </div>
 
                                     <div className="grid grid-cols-2 gap-4">
                                         <button
@@ -984,6 +1693,42 @@
                                         </button>
                                     </div>
 
+                                    <div className="rounded-[2rem] border-2 border-slate-100 bg-gradient-to-br from-slate-50 to-white p-6 space-y-4">
+                                        <div className="flex flex-wrap justify-between items-start gap-3">
+                                            <div>
+                                                <h4 className="font-black text-lg uppercase tracking-tight">四索引对比图</h4>
+                                                <p className="text-xs text-slate-500 mt-1 max-w-lg">
+                                                    左轴 Recall@{topK}、右轴加速比；Exact 为准确度基线（100% / 1×）。
+                                                    答辩可直接展示 ANN 在速度-精度上的权衡。
+                                                </p>
+                                            </div>
+                                            <div className="flex flex-wrap gap-2">
+                                                {BENCH_INDEX_ORDER.map(t => {
+                                                    const built = readyIndices.some(i =>
+                                                        i.dataset_id === Number(selectedDsId) && i.index_type === t
+                                                    );
+                                                    const tested = benchmarkChartRows?.find(r => r.index_type === t)?.present;
+                                                    return (
+                                                        <span key={t} className={`px-2 py-1 rounded-lg text-[9px] font-black uppercase ${tested ? 'bg-blue-100 text-blue-700' : built ? 'bg-slate-100 text-slate-500' : 'bg-red-50 text-red-400'}`}>
+                                                            {INDEX_TYPES.find(x => x.type === t)?.label || t}
+                                                            {tested ? ' ✓' : built ? ' ·' : ' ×'}
+                                                        </span>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+                                        {benchmarkChartRows ? (
+                                            <div className="relative h-[380px] w-full">
+                                                <canvas id="bench-compare-chart" />
+                                            </div>
+                                        ) : (
+                                            <div className="h-[280px] flex flex-col items-center justify-center text-slate-300 border-2 border-dashed border-slate-200 rounded-3xl">
+                                                <p className="font-black text-sm uppercase tracking-widest">暂无评测数据</p>
+                                                <p className="text-xs mt-2 text-slate-400">构建 Exact + 三种 ANN 后，点击「评测全部 ANN」生成对比图</p>
+                                            </div>
+                                        )}
+                                    </div>
+
                                     {evalResult && !evalBatchResults && (
                                         <div className="grid grid-cols-2 gap-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
                                             <div className="col-span-2 text-center">
@@ -1000,12 +1745,12 @@
                                                 <p className="mt-4 text-[10px] font-medium opacity-40">Exact 平均 {evalResult.avg_exact_time_ms?.toFixed(2)} ms · ANN 平均 {evalResult.avg_ann_time_ms?.toFixed(2)} ms</p>
                                             </div>
                                             <div className="p-10 bg-blue-600 text-white rounded-[3rem] shadow-xl">
-                                                <p className="text-xs font-black uppercase text-blue-100 mb-2">RECALL @10</p>
+                                                <p className="text-xs font-black uppercase text-blue-100 mb-2">RECALL @{evalResult.k || topK}</p>
                                                 <div className="flex items-baseline gap-2">
                                                     <span className="text-6xl font-black">{(evalResult.recall_at_k * 100).toFixed(1)}</span>
                                                     <span className="text-2xl font-bold opacity-70">%</span>
                                                 </div>
-                                                <p className="mt-4 text-[10px] font-medium opacity-60">基于 {evalResult.n_queries} 次随机查询，对比 Exact Top-10</p>
+                                                <p className="mt-4 text-[10px] font-medium opacity-60">基于 {evalResult.n_queries} 次随机查询，对比 Exact Top-{evalResult.k || topK}</p>
                                             </div>
                                         </div>
                                     )}
@@ -1018,7 +1763,7 @@
                                                     <thead className="bg-slate-50 text-[10px] font-black uppercase text-slate-400">
                                                         <tr>
                                                             <th className="text-left p-3">索引</th>
-                                                            <th className="text-left p-3">Recall@10</th>
+                                                            <th className="text-left p-3">Recall@{topK}</th>
                                                             <th className="text-left p-3">加速比</th>
                                                             <th className="text-left p-3">ANN 耗时</th>
                                                             <th className="text-left p-3">Exact 耗时</th>
@@ -1041,6 +1786,45 @@
                                                                     <td className="p-3 text-slate-500">{r.avg_exact_time_ms?.toFixed(2)} ms</td>
                                                                 </tr>
                                                             ))}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {evalReports.length > 0 && (
+                                        <div className="space-y-4 border-t border-slate-100 pt-8">
+                                            <div className="flex flex-wrap justify-between items-center gap-3">
+                                                <h4 className="font-black text-lg uppercase tracking-tight">历史评测报告</h4>
+                                                <button type="button" onClick={() => setView('records')} className="text-[10px] font-black uppercase text-blue-600 hover:underline">
+                                                    在记录中心查看全部 →
+                                                </button>
+                                            </div>
+                                            <div className="overflow-x-auto rounded-2xl border border-slate-100">
+                                                <table className="w-full text-sm">
+                                                    <thead className="bg-slate-50 text-[10px] font-black uppercase text-slate-400">
+                                                        <tr>
+                                                            <th className="text-left p-3">时间</th>
+                                                            <th className="text-left p-3">索引</th>
+                                                            <th className="text-left p-3">Recall@K</th>
+                                                            <th className="text-left p-3">QPS</th>
+                                                            <th className="text-left p-3">ANN 延迟</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        {evalReports.slice(0, 8).map(r => (
+                                                            <tr key={r.id} className="border-t border-slate-100">
+                                                                <td className="p-3 text-xs text-slate-500">{formatDateTime(r.created_at)}</td>
+                                                                <td className="p-3 font-black uppercase text-xs">{r.index_type}</td>
+                                                                <td className="p-3">
+                                                                    <span className="px-2 py-1 rounded-lg text-xs font-black bg-blue-50 text-blue-700">
+                                                                        {((r.recall_at_k || 0) * 100).toFixed(1)}%
+                                                                    </span>
+                                                                </td>
+                                                                <td className="p-3 text-xs font-bold">{(r.qps || 0).toFixed(1)}</td>
+                                                                <td className="p-3 text-xs text-blue-600 font-bold">{(r.avg_latency_ms || 0).toFixed(2)} ms</td>
+                                                            </tr>
+                                                        ))}
                                                     </tbody>
                                                 </table>
                                             </div>
