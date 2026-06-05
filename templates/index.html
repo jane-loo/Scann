@@ -27,6 +27,8 @@
 <body>
     <div id="root"></div>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
     <script src="/static/js/api.js"></script>
     <script src="/static/js/search-viz.js"></script>
     <script src="/static/js/cell-compare.js"></script>
@@ -1221,7 +1223,7 @@
                                                                     </>
                                                                 )}
                                                             </p>
-                                                            <div className="flex flex-wrap gap-2">
+                                                            <div className="flex flex-wrap gap-2 items-center">
                                                                 {[
                                                                     ['scatter', '散点图'],
                                                                     ['similarity', '相似度'],
@@ -1233,6 +1235,14 @@
                                                                         {label}
                                                                     </button>
                                                                 ))}
+                                                                {vizTab === 'scatter' && (
+                                                                    <button
+                                                                        onClick={() => SearchViz.resetZoom('sviz-scatter')}
+                                                                        className="ml-auto px-3 py-1.5 rounded-lg text-[10px] font-black text-slate-400 border border-slate-200 hover:border-slate-400 hover:text-slate-600 transition-all"
+                                                                        title="重置缩放（双击图表也可重置）">
+                                                                        ↺ 重置缩放
+                                                                    </button>
+                                                                )}
                                                             </div>
                                                             <div className="bg-white rounded-[2rem] border border-slate-100 p-4 h-[420px] relative">
                                                                 {vizTab === 'scatter' && !embedData && (

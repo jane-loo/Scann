@@ -58,13 +58,18 @@
         const queryIdx = resolveQueryIndex(ids, idxMap, queryCellId, fallbackQueryId);
         const resolvedQueryId = queryIdx !== undefined ? String(ids[queryIdx]) : null;
         const hitSet = new Set((results || []).map((r) => String(r.cell_id)));
-        const bg = [];
+        const bgFull = [];
         ids.forEach((id, i) => {
             const sid = String(id);
             if (sid !== resolvedQueryId && !hitSet.has(sid)) {
-                bg.push({ x: xs[i], y: ys[i] });
+                bgFull.push({ x: xs[i], y: ys[i] });
             }
         });
+        // 背景点抽样：最多 2000 个，缩放后会自然分散，不需要太多
+        const MAX_BG = 20000;
+        const bg = bgFull.length > MAX_BG
+            ? bgFull.filter((_, i) => i % Math.ceil(bgFull.length / MAX_BG) === 0)
+            : bgFull;
 
         const hits = (results || [])
             .filter((r) => idxMap[String(r.cell_id)] !== undefined)
@@ -79,13 +84,14 @@
                 };
             });
 
+        // 数组顺序决定渲染层次：先入数组 = 先渲染 = 在下层
+        // 背景灰点最先，命中彩色点其次，查询红点最后（最上层）
         const datasets = [
             {
                 label: '其他细胞',
                 data: bg,
-                order: 1,
                 pointRadius: 3,
-                pointBackgroundColor: 'rgba(148, 163, 184, 0.35)',
+                pointBackgroundColor: 'rgba(148, 163, 184, 0.30)',
                 pointBorderWidth: 0,
             },
         ];
@@ -94,7 +100,6 @@
             datasets.push({
                 label: 'Top-K 相似细胞',
                 data: hits,
-                order: 2,
                 pointRadius: 9,
                 pointBackgroundColor: hits.map((h) => hitColor(h.rank, hits.length)),
                 pointBorderColor: '#fff',
@@ -107,12 +112,11 @@
             datasets.push({
                 label: '查询细胞',
                 data: [{ x: xs[queryIdx], y: ys[queryIdx], label: resolvedQueryId }],
-                order: 3,
-                pointRadius: 11,
+                pointRadius: 13,
                 pointStyle: 'circle',
-                pointBackgroundColor: 'rgba(239, 68, 68, 0.45)',
+                pointBackgroundColor: 'rgba(239, 68, 68, 0.55)',
                 pointBorderColor: '#ef4444',
-                pointBorderWidth: 2.5,
+                pointBorderWidth: 3,
             });
         } else if (queryCellId === 'Vector' || fallbackQueryId === null) {
             titleSuffix = '（向量检索，无单一查询细胞位置）';
@@ -165,6 +169,20 @@
                     x: { title: { display: true, text: 'Dim 1' }, grid: { color: 'rgba(0,0,0,0.04)' } },
                     y: { title: { display: true, text: 'Dim 2' }, grid: { color: 'rgba(0,0,0,0.04)' } },
                 },
+                plugins: {
+                    zoom: {
+                        zoom: {
+                            wheel: { enabled: true, speed: 0.08 },
+                            pinch: { enabled: true },
+                            mode: 'xy',
+                        },
+                        pan: {
+                            enabled: true,
+                            mode: 'xy',
+                            threshold: 5,
+                        },
+                    },
+                },
                 onClick(evt, elements, chart) {
                     if (!elements.length || typeof onCellClick !== 'function') return;
                     const pt = chart.data.datasets[elements[0].datasetIndex].data[elements[0].index];
@@ -173,6 +191,10 @@
             },
         });
         charts[canvasId].resize();
+    }
+
+    function resetZoom(canvasId) {
+        if (charts[canvasId]?.resetZoom) charts[canvasId].resetZoom();
     }
 
     /** 水平柱状图：Top-K 相似度 */
@@ -564,6 +586,7 @@
     window.SearchViz = {
         destroyAll,
         renderScatter,
+        resetZoom,
         renderJointScatter,
         renderSimilarityBars,
         renderCellTypeBars,
