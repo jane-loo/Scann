@@ -59,14 +59,33 @@ class HNSWIndex:
     # ──────────────────────────────────────────────
 
     def save(self, path: str) -> None:
-        """将索引保存到文件（hnswlib 原生二进制格式）。"""
+        """将索引保存到文件（hnswlib 原生二进制格式）。
+
+        hnswlib 的 C++ 实现在 Windows 上无法处理路径中的非 ASCII 字符（如中文目录名）。
+        解决方案：先保存到系统临时目录（纯 ASCII 路径），再用 Python 的 shutil.move 移到目标。
+        """
         if self.index is None:
             raise RuntimeError('索引尚未构建，请先调用 build()')
-        self.index.save_index(path)
+
+        # 路径全为 ASCII 时直接保存，无需绕路
+        if all(ord(c) < 128 for c in path):
+            self.index.save_index(path)
+            return
+
+        import tempfile, shutil, os
+        fd, tmp_path = tempfile.mkstemp(suffix='.bin')
+        os.close(fd)
+        try:
+            self.index.save_index(tmp_path)
+            shutil.move(tmp_path, path)
+        except Exception:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            raise
 
     def load(self, path: str, dim: int, space: str = 'l2') -> None:
         """
-        从文件加载索引。
+        从文件加载索引。hnswlib 同样不支持非 ASCII 路径，先复制到临时文件再加载。
 
         Args:
             path:  索引文件路径
@@ -76,7 +95,20 @@ class HNSWIndex:
         self.dim   = dim
         self.space = space
         index = hnswlib.Index(space=space, dim=dim)
-        index.load_index(path, max_elements=0)   # 0 = 不限制，使用文件中的值
+
+        if all(ord(c) < 128 for c in path):
+            index.load_index(path, max_elements=0)
+        else:
+            import tempfile, shutil, os
+            fd, tmp_path = tempfile.mkstemp(suffix='.bin')
+            os.close(fd)
+            try:
+                shutil.copy2(path, tmp_path)
+                index.load_index(tmp_path, max_elements=0)
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+
         self.index = index
 
     # ──────────────────────────────────────────────

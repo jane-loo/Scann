@@ -19,6 +19,9 @@
         .card { background: white; border-radius: 24px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); border: 1px solid #e5e7eb; }
         ::-webkit-scrollbar { width: 6px; }
         ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+        .scrollbar-thin::-webkit-scrollbar { width: 4px; }
+        .scrollbar-thin::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
+        .scrollbar-thin::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
     </style>
 </head>
 <body>
@@ -90,6 +93,10 @@
             const [evalBatchResults, setEvalBatchResults] = useState(null);
             const [evalLoading, setEvalLoading] = useState(false);
             const [evalIdxId, setEvalIdxId] = useState('');
+
+            // Search & Build params
+            const [topK, setTopK] = useState(10);
+            const [buildMetric, setBuildMetric] = useState('l2');
 
             useEffect(() => {
                 ScannAPI.getCurrentUser()
@@ -305,7 +312,7 @@
                             dataset_id: Number(selectedDsId),
                             index_id: Number(selectedIdxId),
                             cell_id: queryInput,
-                            top_k: 10,
+                            top_k: topK,
                             filters: searchFilters
                         });
                     } else {
@@ -315,7 +322,7 @@
                             dataset_id: Number(selectedDsId),
                             index_id: Number(selectedIdxId),
                             vector: vec,
-                            top_k: 10,
+                            top_k: topK,
                             filters: searchFilters
                         });
                     }
@@ -338,7 +345,7 @@
                     const res = await ScannAPI.searchRandom({
                         dataset_id: Number(selectedDsId),
                         index_id: Number(pickIdxId),
-                        top_k: 10,
+                        top_k: topK,
                     });
 
                     if (!res?.query_cell_id) throw { error: '随机测试未返回有效 Cell ID' };
@@ -374,13 +381,13 @@
                         if (cellId) {
                             res = await ScannAPI.searchByCell({
                                 dataset_id: Number(selectedDsId), index_id: Number(idxId),
-                                cell_id: cellId, top_k: 10, filters: searchFilters,
+                                cell_id: cellId, top_k: topK, filters: searchFilters,
                             });
                         } else if (searchType === 'vec') {
                             const vec = JSON.parse(queryInput);
                             res = await ScannAPI.searchByVector({
                                 dataset_id: Number(selectedDsId), index_id: Number(idxId),
-                                vector: vec, top_k: 10, filters: searchFilters,
+                                vector: vec, top_k: topK, filters: searchFilters,
                             });
                         } else {
                             throw { error: '对比模式请使用 Cell ID 或 Vector 检索' };
@@ -441,12 +448,29 @@
                 finally { setEvalLoading(false); }
             };
 
-            const buildIdx = async (dsId, type) => {
+            const buildIdx = async (dsId, type, metric = buildMetric) => {
                 try {
-                    await ScannAPI.buildIndex({ dataset_id: dsId, index_type: type });
-                    alert("任务已提交");
+                    await ScannAPI.buildIndex({ dataset_id: dsId, index_type: type, metric });
+                    alert(`${type.toUpperCase()} / ${metric.toUpperCase()} 构建任务已提交`);
                     loadAll();
-                } catch (e) { alert("提交失败"); }
+                } catch (e) { alert(e.error || "提交失败"); }
+            };
+
+            const deleteDataset = async (dsId, dsName) => {
+                if (!confirm(`确定删除数据集「${dsName}」及其所有索引？此操作不可撤销。`)) return;
+                try {
+                    await ScannAPI.deleteDataset(dsId);
+                    if (String(selectedDsId) === String(dsId)) setSelectedDsId('');
+                    loadAll();
+                } catch (e) { alert(e.error || '删除数据集失败'); }
+            };
+
+            const deleteIndex = async (idxId) => {
+                if (!confirm('确定删除该索引？')) return;
+                try {
+                    await ScannAPI.deleteIndex(idxId);
+                    loadAll();
+                } catch (e) { alert(e.error || '删除索引失败'); }
             };
 
             const resolveQueryCellId = () => {
@@ -583,7 +607,7 @@
                                                 </select>
                                                 {!indexCompareMode ? (
                                                     <select className="w-full p-4 bg-slate-50 rounded-xl font-bold text-sm border-none focus:ring-2 ring-blue-500" value={selectedIdxId} onChange={e=>setSelectedIdxId(e.target.value)}>
-                                                        {readyIndices.map(i=><option key={i.id} value={i.id}>{i.index_type.toUpperCase()} ({i.metric})</option>)}
+                                                        {readyIndices.map(i=><option key={i.id} value={i.id}>{i.index_type.toUpperCase()} · {i.metric.toUpperCase()}</option>)}
                                                         {readyIndices.length === 0 && <option value="">无可用索引</option>}
                                                     </select>
                                                 ) : (
@@ -618,6 +642,16 @@
                                                     <span className="text-xs font-black text-slate-700">索引对比模式</span>
                                                     <span className="text-[9px] text-slate-400">并行检索，对比耗时与 Top-10 重叠率</span>
                                                 </label>
+
+                                                {/* 返回结果数量 */}
+                                                <div>
+                                                    <label className="text-[9px] font-black text-slate-400 uppercase block mb-1">返回结果数量 Top-K</label>
+                                                    <input
+                                                        type="number" min="1" max="200" value={topK}
+                                                        onChange={e => setTopK(Math.max(1, Math.min(200, Number(e.target.value))))}
+                                                        className="w-full p-3 bg-slate-50 rounded-xl font-bold text-sm border-none focus:ring-2 ring-blue-500 outline-none"
+                                                    />
+                                                </div>
                                             </div>
                                         </section>
 
@@ -783,7 +817,7 @@
                                                                     ['scatter', '散点图'],
                                                                     ['similarity', '相似度'],
                                                                     ['distance', '向量距离'],
-                                                                    ['celltype', '类型分布'],
+                                                                    ['celltype', '元数据分布'],
                                                                 ].map(([k, label]) => (
                                                                     <button key={k} onClick={()=>setVizTab(k)}
                                                                         className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase border-2 transition-all ${vizTab===k?'border-blue-600 bg-blue-50 text-blue-600':'border-slate-200 text-slate-400 hover:border-slate-300'}`}>
@@ -842,16 +876,30 @@
 
                         {view === 'datasets' && (
                             <div className="max-w-6xl mx-auto space-y-8">
-                                <header className="flex justify-between items-center">
+                                <header className="flex justify-between items-center gap-4">
                                     <div>
                                         <h2 className="text-3xl font-black tracking-tight">库与索引管理</h2>
                                         <p className="text-slate-400 font-medium">数据集生命周期及 ANN 索引健康度控制</p>
                                     </div>
-                                    <label className="flex items-center gap-3 px-6 py-4 bg-white border-2 border-dashed border-blue-200 rounded-2xl cursor-pointer hover:border-blue-500 transition-all">
-                                        <input type="file" className="hidden" onChange={handleUpload} disabled={uploading} />
-                                        {uploading ? <div className="spinner"></div> : <svg className="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M12 4v16m8-8H4"/></svg>}
-                                        <span className="font-black text-sm text-blue-600 uppercase">{uploading ? '正在上传...' : '上传新数据集 (.h5ad)'}</span>
-                                    </label>
+                                    <div className="flex items-center gap-3 flex-shrink-0">
+                                        {/* 构建度量选择 */}
+                                        <div className="flex flex-col items-end gap-1">
+                                            <span className="text-[9px] font-black text-slate-400 uppercase">构建度量方式</span>
+                                            <div className="flex gap-1 p-1 bg-slate-100 rounded-xl">
+                                                {[['l2','L2 欧氏'],['cosine','Cosine 余弦']].map(([val,label])=>(
+                                                    <button key={val} onClick={()=>setBuildMetric(val)}
+                                                        className={`px-3 py-2 rounded-lg text-[10px] font-black transition-all ${buildMetric===val?'bg-white text-blue-600 shadow-sm':'text-slate-400 hover:text-slate-600'}`}>
+                                                        {label}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+                                        <label className="flex items-center gap-3 px-6 py-4 bg-white border-2 border-dashed border-blue-200 rounded-2xl cursor-pointer hover:border-blue-500 transition-all">
+                                            <input type="file" className="hidden" onChange={handleUpload} disabled={uploading} />
+                                            {uploading ? <div className="spinner"></div> : <svg className="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M12 4v16m8-8H4"/></svg>}
+                                            <span className="font-black text-sm text-blue-600 uppercase">{uploading ? '正在上传...' : '上传新数据集 (.h5ad)'}</span>
+                                        </label>
+                                    </div>
                                 </header>
 
                                 <div className="grid grid-cols-2 gap-8">
@@ -859,23 +907,40 @@
                                         <div key={ds.id} className="card p-8 group hover:shadow-xl transition-shadow relative overflow-hidden">
                                             <div className="absolute top-0 right-0 w-32 h-32 bg-blue-50 rounded-full -mr-16 -mt-16 group-hover:bg-blue-100 transition-colors"></div>
                                             <div className="relative">
-                                                <h3 className="text-2xl font-black mb-1">{ds.name}</h3>
+                                                <div className="flex items-start justify-between mb-1">
+                                                    <h3 className="text-2xl font-black">{ds.name}</h3>
+                                                    <button onClick={()=>deleteDataset(ds.id, ds.name)}
+                                                        className="p-2 rounded-xl text-slate-300 hover:text-red-500 hover:bg-red-50 transition-all flex-shrink-0"
+                                                        title="删除数据集（含所有索引）">
+                                                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                                                    </button>
+                                                </div>
                                                 <p className="text-xs font-bold text-slate-400 mb-6 flex items-center gap-2">
                                                     <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path d="M7 3a1 1 0 000 2h6a1 1 0 100-2H7zM4 7a1 1 0 011-1h10a1 1 0 110 2H5a1 1 0 01-1-1zM2 11a2 2 0 012-2h12a2 2 0 012 2v4a2 2 0 01-2 2H4a2 2 0 01-2-2v-4z"/></svg>
-                                                    {ds.n_cells?.toLocaleString() || 0} CELLS
+                                                    {ds.n_cells?.toLocaleString() || 0} CELLS · {ds.n_dims || 0} DIMS
                                                 </p>
                                                 
-                                                <div className="space-y-3 mb-8">
+                                                <div className="space-y-2 mb-6 max-h-56 overflow-y-auto pr-1 scrollbar-thin">
+                                                    {indices.filter(i=>i.dataset_id===ds.id).length === 0 && (
+                                                        <p className="text-[10px] text-slate-400 font-bold text-center py-3">暂无索引，点击下方按钮构建</p>
+                                                    )}
                                                     {indices.filter(i=>i.dataset_id===ds.id).map(i=>(
-                                                        <div key={i.id} className="flex justify-between items-start gap-3 p-4 bg-slate-50 rounded-2xl border border-slate-100">
-                                                            <div className="min-w-0">
-                                                                <p className="font-black text-xs uppercase">{i.index_type} 索引</p>
-                                                                <p className="text-[10px] text-slate-400 font-bold uppercase">{i.metric} 度量</p>
+                                                        <div key={i.id} className="flex justify-between items-start gap-3 p-3 bg-slate-50 rounded-xl border border-slate-100">
+                                                            <div className="min-w-0 flex-1">
+                                                                <p className="font-black text-xs uppercase">{i.index_type} 索引 · {i.metric.toUpperCase()}</p>
+                                                                {i.build_time && <p className="text-[10px] text-slate-400 font-bold">构建耗时 {i.build_time.toFixed(1)}s</p>}
                                                                 {i.status === 'error' && i.params?._error && (
                                                                     <p className="text-[10px] text-red-500 mt-1 leading-snug break-words">{i.params._error}</p>
                                                                 )}
                                                             </div>
-                                                            <span className={`shrink-0 px-3 py-1 rounded-full text-[10px] font-black uppercase ${i.status==='ready'?'bg-green-100 text-green-600':i.status==='error'?'bg-red-100 text-red-600':'bg-yellow-100 text-yellow-600'}`}>{i.status}</span>
+                                                            <div className="flex items-center gap-2 flex-shrink-0">
+                                                                <span className={`px-3 py-1 rounded-full text-[10px] font-black uppercase ${i.status==='ready'?'bg-green-100 text-green-600':i.status==='error'?'bg-red-100 text-red-600':'bg-yellow-100 text-yellow-600'}`}>{i.status}</span>
+                                                                <button onClick={()=>deleteIndex(i.id)}
+                                                                    className="p-1.5 rounded-lg text-slate-300 hover:text-red-500 hover:bg-red-50 transition-all"
+                                                                    title="删除索引">
+                                                                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                                                                </button>
+                                                            </div>
                                                         </div>
                                                     ))}
                                                 </div>

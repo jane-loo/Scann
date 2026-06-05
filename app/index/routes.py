@@ -79,8 +79,8 @@ def build_index():
     params = dict(params)
     params.setdefault('dim', dataset.n_dims or 30)
 
-    # 同数据集同类型只保留一份索引，避免重复列表与误选旧记录
-    remove_indexes_for_dataset(dataset_id, index_type)
+    # 同数据集同类型+同 metric 只保留一份，不同 metric 可共存（如 hnsw-l2 + hnsw-cosine）
+    remove_indexes_for_dataset(dataset_id, index_type, metric)
 
     ann_index = AnnIndex(
         dataset_id = dataset_id,
