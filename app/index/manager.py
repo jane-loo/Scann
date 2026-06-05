@@ -89,12 +89,17 @@ def remove_index_record(ann_index: AnnIndex) -> None:
     db.session.delete(ann_index)
 
 
-def remove_indexes_for_dataset(dataset_id: int, index_type: str) -> None:
-    """删除同一数据集下指定类型的全部旧索引（重建前替换）。"""
-    existing = AnnIndex.query.filter_by(
-        dataset_id=dataset_id,
-        index_type=index_type,
-    ).all()
+def remove_indexes_for_dataset(dataset_id: int, index_type: str,
+                                metric: str | None = None) -> None:
+    """
+    删除同一数据集下指定类型（及 metric）的旧索引。
+    metric 为 None 时删除该类型的全部 metric 版本；
+    metric 指定时只删除 (index_type, metric) 这一组合，保留其他 metric。
+    """
+    q = AnnIndex.query.filter_by(dataset_id=dataset_id, index_type=index_type)
+    if metric is not None:
+        q = q.filter_by(metric=metric)
+    existing = q.all()
     for idx in existing:
         remove_index_record(idx)
     if existing:
@@ -117,36 +122,52 @@ def maintain_index_records(index_folder: str | None = None) -> None:
         else:
             return
 
-    for idx in AnnIndex.query.filter(AnnIndex.status == 'building').all():
+    building_all = AnnIndex.query.filter(AnnIndex.status == 'building').all()
+    print(f'[DEBUG maintain] building 数量={len(building_all)}', flush=True)
+    for idx in building_all:
         expected = _index_file_path(
             index_folder, idx.dataset_id, idx.id, idx.index_type
         )
-        if os.path.exists(expected):
+        file_ok = os.path.exists(expected)
+        age_s   = (datetime.utcnow() - idx.created_at).total_seconds() if idx.created_at else 0
+        print(f'[DEBUG maintain]   idx={idx.id} {idx.index_type}/{idx.metric} '
+              f'age={age_s:.0f}s file={file_ok} path={expected}', flush=True)
+        if file_ok:
             idx.status     = 'ready'
             idx.index_file = expected
-        elif idx.created_at and datetime.utcnow() - idx.created_at > timedelta(seconds=15):
+            print(f'[DEBUG maintain]   → 标记 ready', flush=True)
+        elif idx.created_at and datetime.utcnow() - idx.created_at > timedelta(minutes=5):
             idx.status = 'error'
             params = json.loads(idx.params or '{}')
-            params['_error'] = '构建未完成或已中断，请重新构建'
+            params['_error'] = '构建超时（>5min）或已中断，请重新构建'
             idx.params = json.dumps(params, ensure_ascii=False)
+            print(f'[DEBUG maintain]   → 标记 error（超时）', flush=True)
     db.session.commit()
 
     orphans = AnnIndex.query.filter(AnnIndex.status == 'ready').all()
+    print(f'[DEBUG maintain] ready 数量={len(orphans)}', flush=True)
     for idx in orphans:
-        if not index_is_usable(idx):
+        usable = index_is_usable(idx)
+        print(f'[DEBUG maintain]   idx={idx.id} {idx.index_type}/{idx.metric} '
+              f'file={idx.index_file} usable={usable}', flush=True)
+        if not usable:
+            print(f'[DEBUG maintain]   → 删除孤立 ready 记录', flush=True)
             remove_index_record(idx)
     db.session.commit()
 
-    groups: dict[tuple[int, str], list[AnnIndex]] = defaultdict(list)
+    # 按 (dataset_id, index_type, metric) 三元组去重，允许同类型不同 metric 共存
+    groups: dict[tuple[int, str, str], list[AnnIndex]] = defaultdict(list)
     for idx in AnnIndex.query.order_by(AnnIndex.created_at.desc()).all():
-        groups[(idx.dataset_id, idx.index_type)].append(idx)
+        groups[(idx.dataset_id, idx.index_type, idx.metric or 'l2')].append(idx)
 
-    for items in groups.values():
+    for key, items in groups.items():
         if len(items) <= 1:
             continue
+        print(f'[DEBUG maintain] 去重 key={key} 共{len(items)}条', flush=True)
         keep = next((i for i in items if index_is_usable(i)), items[0])
         for stale in items:
             if stale.id != keep.id:
+                print(f'[DEBUG maintain]   → 删除重复 idx={stale.id} status={stale.status}', flush=True)
                 remove_index_record(stale)
     db.session.commit()
 

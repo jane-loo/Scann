@@ -216,52 +216,108 @@
         });
     }
 
-    /** 检索结果细胞类型组成 */
-    function renderCellTypeBars(canvasId, results) {
+    /** 元数据多属性分布（横向堆叠百分比条） */
+    function renderMetaProfile(canvasId, results) {
         destroy(canvasId);
         const el = document.getElementById(canvasId);
         if (!el || !results?.length) return;
 
-        const counts = {};
-        results.forEach((r) => {
-            const t = r.cell_type || r.metadata?.cell_type || '未知';
-            counts[t] = (counts[t] || 0) + 1;
+        // 感兴趣的元数据字段，按展示优先级排列
+        const CANDIDATE_FIELDS = [
+            'cell_type', 'disease', 'sex', 'AgeGroup',
+            'donor_id', 'tissue', 'author_cell_type', 'Phase',
+        ];
+
+        // 统计每个字段的各值出现次数
+        const fieldCounts = {};
+        CANDIDATE_FIELDS.forEach(f => { fieldCounts[f] = {}; });
+        results.forEach(r => {
+            const meta = r.metadata || {};
+            CANDIDATE_FIELDS.forEach(f => {
+                let v = meta[f];
+                if (v === undefined || v === null || v === 'nan' || v === 'NaN') return;
+                v = String(v).trim();
+                if (!v) return;
+                fieldCounts[f][v] = (fieldCounts[f][v] || 0) + 1;
+            });
         });
-        const labels = Object.keys(counts);
-        const values = labels.map((k) => counts[k]);
-        const colors = labels.map((_, i) => `hsla(${200 + i * 35}, 70%, 55%, 0.85)`);
+
+        // 只保留有数据且唯一值 ≥ 1 的字段
+        const fields = CANDIDATE_FIELDS.filter(f =>
+            Object.keys(fieldCounts[f]).length > 0
+        );
+        if (!fields.length) return;
+
+        const total = results.length;
+
+        // 全局唯一值 → 颜色（色调均匀分布）
+        const allVals = [...new Set(fields.flatMap(f => Object.keys(fieldCounts[f])))];
+        const palette = {};
+        allVals.forEach((v, i) => {
+            palette[v] = `hsla(${Math.round(i * 360 / allVals.length)}, 62%, 52%, 0.82)`;
+        });
+
+        // 每个唯一值一个 dataset
+        const datasets = allVals.map(v => ({
+            label: v,
+            data: fields.map(f => {
+                const c = fieldCounts[f][v] || 0;
+                return c > 0 ? +(100 * c / total).toFixed(1) : 0;
+            }),
+            backgroundColor: palette[v],
+            borderRadius: 3,
+        }));
 
         charts[canvasId] = new Chart(el.getContext('2d'), {
             type: 'bar',
-            data: {
-                labels,
-                datasets: [{
-                    label: '细胞数',
-                    data: values,
-                    backgroundColor: colors,
-                    borderRadius: 8,
-                }],
-            },
+            data: { labels: fields, datasets },
             options: {
+                indexAxis: 'y',
                 responsive: true,
                 maintainAspectRatio: false,
                 plugins: {
-                    legend: { display: false },
+                    legend: {
+                        position: 'bottom',
+                        labels: {
+                            boxWidth: 10,
+                            font: { size: 10 },
+                            // 图例太多时截断
+                            filter: (item) => item.text.length <= 20,
+                        },
+                    },
                     title: {
                         display: true,
-                        text: '检索结果 · 细胞类型组成',
+                        text: 'Top-K 结果 · 元数据属性分布（各字段百分比）',
                         font: { size: 13, weight: '700' },
+                    },
+                    tooltip: {
+                        callbacks: {
+                            label(ctx) {
+                                return ctx.raw > 0
+                                    ? `${ctx.dataset.label}: ${ctx.raw}%`
+                                    : null;
+                            },
+                        },
+                        filter(item) { return item.raw > 0; },
                     },
                 },
                 scales: {
-                    y: {
-                        beginAtZero: true,
-                        ticks: { stepSize: 1 },
-                        title: { display: true, text: 'Count' },
+                    x: {
+                        stacked: true,
+                        max: 100,
+                        title: { display: true, text: '占比 (%)' },
+                        ticks: { callback: v => v + '%' },
+                        grid: { color: 'rgba(0,0,0,0.04)' },
                     },
+                    y: { stacked: true },
                 },
             },
         });
+    }
+
+    /** 保留旧接口兼容（内部调用新实现） */
+    function renderCellTypeBars(canvasId, results) {
+        renderMetaProfile(canvasId, results);
     }
 
     /** 距离柱状图（补充：向量空间 L2 距离，越小越近） */
@@ -511,6 +567,7 @@
         renderJointScatter,
         renderSimilarityBars,
         renderCellTypeBars,
+        renderMetaProfile,
         renderDistanceBars,
         fetchEmbedData,
         fetchJointEmbedData,
