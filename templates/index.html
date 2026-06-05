@@ -23,14 +23,36 @@
 </head>
 <body>
     <div id="root"></div>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="/static/js/api.js"></script>
+    <script src="/static/js/search-viz.js"></script>
+    <script src="/static/js/cell-compare.js"></script>
     <script type="text/babel">
         const { useState, useEffect, useMemo } = React;
+
+        const ROLE_LABELS = {
+            visitor: '访客', normal: '普通用户', expert: '资深专家',
+            labadmin: '实验室管理员', sysadmin: '系统管理员'
+        };
+
+        const INDEX_TYPES = [
+            { type: 'hnsw',     label: 'HNSW',     lib: 'hnswlib', desc: '图结构 ANN，速度与精度平衡',
+              btn: 'bg-gradient-to-br from-slate-700 to-slate-900 border-slate-600 text-white shadow-md shadow-slate-900/30 hover:shadow-lg hover:shadow-slate-900/40' },
+            { type: 'exact',    label: 'Exact',    lib: 'FAISS',   desc: '暴力精确检索，作为准确度基线',
+              btn: 'bg-gradient-to-br from-emerald-500 to-teal-600 border-emerald-400 text-white shadow-md shadow-emerald-500/25 hover:shadow-lg hover:shadow-emerald-500/35' },
+            { type: 'ivf_flat', label: 'IVF-Flat', lib: 'FAISS',   desc: '倒排 + 原始向量，中等加速',
+              btn: 'bg-gradient-to-br from-blue-500 to-indigo-600 border-blue-400 text-white shadow-md shadow-blue-500/25 hover:shadow-lg hover:shadow-blue-500/35' },
+            { type: 'ivf_pq',   label: 'IVF-PQ',   lib: 'FAISS',   desc: '倒排 + 乘积量化，省内存',
+              btn: 'bg-gradient-to-br from-violet-500 to-fuchsia-600 border-violet-400 text-white shadow-md shadow-violet-500/25 hover:shadow-lg hover:shadow-violet-500/35' },
+        ];
 
         const App = () => {
             const [user, setUser] = useState(null);
             const [loading, setLoading] = useState(true);
-            const [view, setView] = useState('search'); 
+            const [view, setView] = useState('search');
+            const [showLogin, setShowLogin] = useState(false);
+            const [showRegister, setShowRegister] = useState(false);
+            const [adminUsers, setAdminUsers] = useState([]);
             
             // Data State
             const [datasets, setDatasets] = useState([]);
@@ -49,23 +71,43 @@
             const [filterVal, setFilterVal] = useState('');
             const [searchResults, setSearchResults] = useState(null);
             const [searchLoading, setSearchLoading] = useState(false);
+            const [resultView, setResultView] = useState('viz');
+            const [vizTab, setVizTab] = useState('scatter');
+            const [embedData, setEmbedData] = useState(null);
+            const [compareOpen, setCompareOpen] = useState(false);
+            const [compareLoading, setCompareLoading] = useState(false);
+            const [compareData, setCompareData] = useState(null);
+            const [compareHit, setCompareHit] = useState(null);
+            const [indexCompareMode, setIndexCompareMode] = useState(false);
+            const [compareIndexIds, setCompareIndexIds] = useState([]);
+            const [compareResults, setCompareResults] = useState(null);
             
             // Upload State
             const [uploading, setUploading] = useState(false);
 
             // Eval State
             const [evalResult, setEvalResult] = useState(null);
+            const [evalBatchResults, setEvalBatchResults] = useState(null);
             const [evalLoading, setEvalLoading] = useState(false);
+            const [evalIdxId, setEvalIdxId] = useState('');
 
             useEffect(() => {
                 ScannAPI.getCurrentUser()
-                    .then(u => {
-                        setUser(u);
-                        if(u) loadAll();
-                    })
-                    .catch(() => setUser(null))
+                    .then(u => setUser(u))
+                    .catch(() => setUser({ username: '访客', role: 'visitor', is_guest: true }))
                     .finally(() => setLoading(false));
             }, []);
+
+            useEffect(() => {
+                if (!loading) loadAll();
+            }, [loading]);
+
+            useEffect(() => {
+                const hasBuilding = indices.some(i => i.status === 'building');
+                if (!hasBuilding) return;
+                const timer = setInterval(loadAll, 2000);
+                return () => clearInterval(timer);
+            }, [indices]);
 
             const loadAll = async () => {
                 try {
@@ -79,6 +121,12 @@
                 } catch (err) { console.error(err); }
             };
 
+            const isGuest = !user || user.is_guest;
+            const isLoggedIn = user && !user.is_guest;
+            const isExpert = isLoggedIn && ['expert', 'labadmin', 'sysadmin'].includes(user.role);
+            const isSysAdmin = isLoggedIn && user.role === 'sysadmin';
+            const canManage = isLoggedIn && user.role !== 'visitor';
+
             const currentDataset = useMemo(() => 
                 datasets.find(d => d.id === Number(selectedDsId)),
             [datasets, selectedDsId]);
@@ -91,9 +139,26 @@
                 currentIndices.filter(i => i.status === 'ready'),
             [currentIndices]);
 
+            const benchmarkIndices = useMemo(() =>
+                readyIndices.filter(i => i.index_type !== 'exact'),
+            [readyIndices]);
+
+            const hasExactBaseline = useMemo(() =>
+                readyIndices.some(i => i.index_type === 'exact'),
+            [readyIndices]);
+
+            const selectedEvalIndex = useMemo(() =>
+                benchmarkIndices.find(i => String(i.id) === String(evalIdxId)),
+            [benchmarkIndices, evalIdxId]);
+
             useEffect(() => {
                 if (readyIndices.length > 0) setSelectedIdxId(readyIndices[0].id);
                 else setSelectedIdxId('');
+                if (readyIndices.length > 0) {
+                    setCompareIndexIds(readyIndices.map(i => String(i.id)));
+                } else {
+                    setCompareIndexIds([]);
+                }
                 
                 // Reset filter key if not in current dataset columns
                 if (currentDataset && !currentDataset.obs_columns.includes(filterKey)) {
@@ -110,13 +175,94 @@
                 }
             }, [readyIndices, currentDataset, selectedDsId]);
 
+            useEffect(() => {
+                if (benchmarkIndices.length === 0) {
+                    setEvalIdxId('');
+                    return;
+                }
+                if (!benchmarkIndices.some(i => String(i.id) === String(evalIdxId))) {
+                    setEvalIdxId(benchmarkIndices[0].id);
+                }
+            }, [benchmarkIndices, selectedDsId]);
+
             const handleLogin = async (e) => {
                 e.preventDefault();
                 try {
-                    await ScannAPI.login(e.target.username.value, e.target.password.value);
-                    window.location.reload();
-                } catch (err) { alert("登录失败"); }
+                    const res = await ScannAPI.login(e.target.username.value, e.target.password.value);
+                    setUser(res.user);
+                    setShowLogin(false);
+                    loadAll();
+                } catch (err) { alert(err.error || "登录失败"); }
             };
+
+            const handleRegister = async (e) => {
+                e.preventDefault();
+                try {
+                    await ScannAPI.register({
+                        username: e.target.username.value,
+                        email: e.target.email.value,
+                        password: e.target.password.value,
+                    });
+                    alert('注册成功，请登录');
+                    setShowRegister(false);
+                    setShowLogin(true);
+                } catch (err) { alert(err.error || "注册失败"); }
+            };
+
+            const handleLogout = async () => {
+                try {
+                    const res = await ScannAPI.logout();
+                    setUser(res.user);
+                    setView('search');
+                    loadAll();
+                } catch (err) { alert(err.error || "退出失败"); }
+            };
+
+            const loadAdminUsers = async () => {
+                try {
+                    setAdminUsers(await ScannAPI.getUsers());
+                } catch (e) { alert(e.error || '加载用户失败'); }
+            };
+
+            useEffect(() => {
+                if (view === 'users' && isSysAdmin) loadAdminUsers();
+            }, [view, isSysAdmin]);
+
+            useEffect(() => {
+                if (!searchResults || !selectedDsId || !searchResults.results?.length) {
+                    setEmbedData(null);
+                    SearchViz.destroyAll('sviz-');
+                    return;
+                }
+                let cancelled = false;
+                SearchViz.fetchEmbedData(Number(selectedDsId)).then((data) => {
+                    if (!cancelled) setEmbedData(data);
+                }).catch(() => { if (!cancelled) setEmbedData(null); });
+                return () => { cancelled = true; };
+            }, [searchResults, selectedDsId]);
+
+            useEffect(() => {
+                if (!searchResults?.results?.length || resultView !== 'viz') return;
+                const qid = searchResults.query_cell_id;
+                const fallbackQ = searchType === 'id' ? queryInput.trim() : null;
+                const res = searchResults.results;
+                requestAnimationFrame(() => {
+                    SearchViz.destroyAll('sviz-');
+                    if (vizTab === 'scatter' && embedData) {
+                        SearchViz.renderScatter('sviz-scatter', embedData, qid, res, embedData.source, fallbackQ,
+                            (cellId) => {
+                                const hit = res.find((r) => r.cell_id === cellId);
+                                if (hit) openCellCompare(hit);
+                            });
+                    } else if (vizTab === 'similarity') {
+                        SearchViz.renderSimilarityBars('sviz-similarity', res);
+                    } else if (vizTab === 'celltype') {
+                        SearchViz.renderCellTypeBars('sviz-celltype', res);
+                    } else if (vizTab === 'distance') {
+                        SearchViz.renderDistanceBars('sviz-distance', res);
+                    }
+                });
+            }, [searchResults, embedData, vizTab, resultView, searchType, queryInput]);
 
             const handleUpload = async (e) => {
                 const file = e.target.files[0];
@@ -133,9 +279,18 @@
             };
 
             const runSearch = async () => {
+                if (indexCompareMode) {
+                    try {
+                        await runIndexCompare();
+                    } catch (e) {
+                        if (e?.error) alert(e.error);
+                    }
+                    return;
+                }
                 if (!selectedIdxId) return alert("请先构建索引");
                 setSearchLoading(true);
                 setSearchResults(null);
+                setCompareResults(null);
                 
                 // 使用已存储的多重过滤器，如果当前下拉框也有选择值则临时加入
                 const searchFilters = { ...filters };
@@ -170,24 +325,119 @@
             };
 
             const runRandom = async () => {
-                if (!selectedIdxId) return;
+                if (!selectedIdxId && !indexCompareMode) return;
                 setSearchLoading(true);
                 setSearchResults(null);
+                setCompareResults(null);
                 try {
-                    const res = await ScannAPI.searchRandom({ dataset_id: Number(selectedDsId), index_id: Number(selectedIdxId), top_k: 10 });
-                    setSearchResults(res);
+                    const pickIdxId = indexCompareMode
+                        ? (compareIndexIds[0] || readyIndices[0]?.id)
+                        : selectedIdxId;
+                    if (!pickIdxId) throw { error: '无可用索引，请先构建索引' };
+
+                    const res = await ScannAPI.searchRandom({
+                        dataset_id: Number(selectedDsId),
+                        index_id: Number(pickIdxId),
+                        top_k: 10,
+                    });
+
+                    if (!res?.query_cell_id) throw { error: '随机测试未返回有效 Cell ID' };
+
                     setQueryInput(res.query_cell_id);
                     setSearchType('id');
+
+                    if (indexCompareMode) {
+                        await runIndexCompare(res.query_cell_id);
+                        return;
+                    }
+
+                    setSearchResults(res);
                 } catch (e) { alert(e.error || "随机查找失败"); }
                 finally { setSearchLoading(false); }
             };
 
-            const runEval = async () => {
-                setEvalLoading(true);
+            const runIndexCompare = async (overrideCellId) => {
+                const ids = compareIndexIds.length >= 2 ? compareIndexIds : readyIndices.map(i => String(i.id));
+                if (ids.length < 2) {
+                    throw { error: '索引对比需要至少 2 个 ready 索引，请先在「数据与索引」中构建多种类型' };
+                }
+                setSearchLoading(true);
+                setCompareResults(null);
+                setSearchResults(null);
+                const searchFilters = { ...filters };
+                if (filterKey && filterVal) searchFilters[filterKey] = [filterVal];
+                const cellId = overrideCellId || (searchType === 'id' ? String(queryInput).trim() : null);
                 try {
-                    const res = await ScannAPI.runEvaluation(selectedDsId, { index_id: Number(selectedIdxId) });
+                    const runs = await Promise.all(ids.map(async (idxId) => {
+                        const idx = indices.find(i => String(i.id) === String(idxId));
+                        let res;
+                        if (cellId) {
+                            res = await ScannAPI.searchByCell({
+                                dataset_id: Number(selectedDsId), index_id: Number(idxId),
+                                cell_id: cellId, top_k: 10, filters: searchFilters,
+                            });
+                        } else if (searchType === 'vec') {
+                            const vec = JSON.parse(queryInput);
+                            res = await ScannAPI.searchByVector({
+                                dataset_id: Number(selectedDsId), index_id: Number(idxId),
+                                vector: vec, top_k: 10, filters: searchFilters,
+                            });
+                        } else {
+                            throw { error: '对比模式请使用 Cell ID 或 Vector 检索' };
+                        }
+                        return {
+                            index_id: Number(idxId),
+                            index_type: idx?.index_type || '?',
+                            metric: idx?.metric || 'l2',
+                            query_time_ms: res.query_time_ms || res.time_ms,
+                            top_ids: (res.results || []).map(r => r.cell_id),
+                            results: res.results || [],
+                        };
+                    }));
+                    const baseline = runs.find(r => r.index_type === 'exact') || runs[0];
+                    const enriched = runs.map(r => ({
+                        ...r,
+                        overlap_with_baseline: r.top_ids.filter(id => baseline.top_ids.includes(id)).length,
+                        overlap_pct: baseline.top_ids.length
+                            ? Math.round(100 * r.top_ids.filter(id => baseline.top_ids.includes(id)).length / baseline.top_ids.length)
+                            : 0,
+                    }));
+                    setCompareResults({ runs: enriched, baseline_type: baseline.index_type, query: cellId || 'Vector' });
+                } catch (e) {
+                    throw (e && e.error) ? e : { error: '索引对比失败' };
+                }
+                finally { setSearchLoading(false); }
+            };
+
+            const toggleCompareIndex = (id) => {
+                const sid = String(id);
+                setCompareIndexIds(prev =>
+                    prev.includes(sid) ? prev.filter(x => x !== sid) : [...prev, sid]
+                );
+            };
+
+            const runEval = async () => {
+                if (!evalIdxId) return alert('请先选择要评测的 ANN 索引');
+                if (!hasExactBaseline) return alert('需要 Exact 索引作为基线，请先在「数据与索引」中构建 Exact');
+                setEvalLoading(true);
+                setEvalBatchResults(null);
+                try {
+                    const res = await ScannAPI.runEvaluation(selectedDsId, { index_id: Number(evalIdxId) });
                     setEvalResult(res);
                 } catch (e) { alert(e.error || "评测失败"); }
+                finally { setEvalLoading(false); }
+            };
+
+            const runEvalBatch = async () => {
+                if (benchmarkIndices.length === 0) return alert('没有可评测的 ANN 索引');
+                if (!hasExactBaseline) return alert('需要 Exact 索引作为基线，请先在「数据与索引」中构建 Exact');
+                setEvalLoading(true);
+                setEvalResult(null);
+                try {
+                    const res = await ScannAPI.runBatchEvaluation(selectedDsId, {});
+                    setEvalBatchResults(res.results || []);
+                    if (res.results?.length) setEvalResult(res.results[0]);
+                } catch (e) { alert(e.error || "批量评测失败"); }
                 finally { setEvalLoading(false); }
             };
 
@@ -199,25 +449,48 @@
                 } catch (e) { alert("提交失败"); }
             };
 
+            const resolveQueryCellId = () => {
+                if (searchType === 'id' && queryInput.trim()) return queryInput.trim();
+                const q = searchResults?.query_cell_id;
+                return q && q !== 'Vector' ? q : null;
+            };
+
+            const renderCompareCharts = (data) => {
+                CellCompare.destroyAll();
+                CellCompare.renderVectorBars('cmp-vector', data.vector_dims, data.has_query);
+                if (data.has_query) CellCompare.renderDeltaBars('cmp-delta', data.vector_dims);
+                CellCompare.renderPairMap('cmp-map', {
+                    query: data.embed_2d?.query,
+                    target: data.embed_2d?.target,
+                    query_label: data.query?.cell_id,
+                    target_label: data.target?.cell_id,
+                }, data.has_query, embedData?.source || 'PCA');
+            };
+
+            const openCellCompare = async (hitResult) => {
+                if (!hitResult || !selectedDsId) return;
+                setCompareHit(hitResult);
+                setCompareOpen(true);
+                setCompareLoading(true);
+                setCompareData(null);
+                try {
+                    const data = await ScannAPI.compareCells(Number(selectedDsId), {
+                        query_cell_id: resolveQueryCellId(),
+                        target_cell_id: hitResult.cell_id,
+                        search_distance: hitResult.distance,
+                        search_similarity: hitResult.similarity,
+                    });
+                    setCompareData(data);
+                    setTimeout(() => renderCompareCharts(data), 80);
+                } catch (e) {
+                    alert(e.error || '加载对比详情失败');
+                    setCompareOpen(false);
+                } finally {
+                    setCompareLoading(false);
+                }
+            };
+
             if (loading) return <div className="h-screen flex items-center justify-center font-black italic text-blue-600">SCANN LOADING...</div>;
-
-            if (!user) return (
-                <div className="flex items-center justify-center min-h-screen bg-slate-950">
-                    <form onSubmit={handleLogin} className="bg-white p-12 rounded-[2rem] w-full max-w-md shadow-2xl">
-                        <div className="text-center mb-10">
-                            <h1 className="text-4xl font-black italic text-slate-900 leading-none">SCANN<span className="text-blue-600">.</span></h1>
-                            <p className="text-slate-400 font-bold text-sm mt-2">PROFESSIONAL SINGLE-CELL SEARCH</p>
-                        </div>
-                        <div className="space-y-4">
-                            <input name="username" placeholder="Username" defaultValue="sysadmin" className="w-full p-4 bg-slate-100 rounded-2xl font-bold border-none focus:ring-2 ring-blue-500 outline-none" />
-                            <input name="password" type="password" placeholder="Password" defaultValue="pass123" className="w-full p-4 bg-slate-100 rounded-2xl font-bold border-none focus:ring-2 ring-blue-500 outline-none" />
-                            <button className="w-full py-4 btn-primary rounded-2xl font-black text-lg shadow-xl shadow-blue-500/30">LOGIN</button>
-                        </div>
-                    </form>
-                </div>
-            );
-
-            const isExpert = ['expert', 'labadmin', 'sysadmin'].includes(user.role);
 
             return (
                 <div className="min-h-screen flex text-slate-800">
@@ -233,29 +506,52 @@
                                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
                                 <span>检索工作平台</span>
                             </button>
-                            <button onClick={()=>setView('datasets')} className={`w-full flex items-center gap-3 p-4 rounded-2xl transition-all ${view==='datasets'?'bg-blue-50 text-blue-600':'text-slate-400 hover:bg-slate-50'}`}>
-                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
-                                <span>数据与索引</span>
-                            </button>
+                            {canManage && (
+                                <button onClick={()=>setView('datasets')} className={`w-full flex items-center gap-3 p-4 rounded-2xl transition-all ${view==='datasets'?'bg-blue-50 text-blue-600':'text-slate-400 hover:bg-slate-50'}`}>
+                                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
+                                    <span>数据与索引</span>
+                                </button>
+                            )}
                             {isExpert && (
                                 <button onClick={()=>setView('eval')} className={`w-full flex items-center gap-3 p-4 rounded-2xl transition-all ${view==='eval'?'bg-blue-50 text-blue-600':'text-slate-400 hover:bg-slate-50'}`}>
                                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
                                     <span>性能标测器</span>
                                 </button>
                             )}
+                            {isSysAdmin && (
+                                <button onClick={()=>setView('users')} className={`w-full flex items-center gap-3 p-4 rounded-2xl transition-all ${view==='users'?'bg-blue-50 text-blue-600':'text-slate-400 hover:bg-slate-50'}`}>
+                                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
+                                    <span>用户管理</span>
+                                </button>
+                            )}
                         </nav>
 
                         <div className="mt-auto space-y-4">
+                            {isGuest && (
+                                <div className="p-4 bg-amber-50 border border-amber-100 rounded-2xl text-xs text-amber-800 font-medium leading-relaxed">
+                                    当前为<strong>访客模式</strong>，可使用公共演示数据检索。登录后可上传数据、构建索引等。
+                                </div>
+                            )}
                             <button onClick={loadAll} className="w-full p-3 bg-slate-900 text-white rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-slate-800 transition-all flex items-center justify-center gap-2">
                                 <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
                                 同步云端数据
                             </button>
-                            <div className="p-4 bg-slate-50 rounded-2xl flex items-center gap-3 border">
-                                <div className="w-10 h-10 bg-white rounded-full flex items-center justify-center border-2 border-blue-100 font-black text-blue-600">{user.username[0].toUpperCase()}</div>
-                                <div className="min-w-0">
-                                    <p className="text-xs font-black text-blue-500 uppercase leading-none mb-1">{user.role}</p>
-                                    <p className="font-bold truncate text-sm">{user.username}</p>
+                            <div className="p-4 bg-slate-50 rounded-2xl border space-y-3">
+                                <div className="flex items-center gap-3">
+                                    <div className="w-10 h-10 bg-white rounded-full flex items-center justify-center border-2 border-blue-100 font-black text-blue-600">{(user?.username || '访')[0].toUpperCase()}</div>
+                                    <div className="min-w-0 flex-1">
+                                        <p className="text-xs font-black text-blue-500 uppercase leading-none mb-1">{ROLE_LABELS[user?.role] || user?.role}</p>
+                                        <p className="font-bold truncate text-sm">{user?.username || '访客'}</p>
+                                    </div>
                                 </div>
+                                {isGuest ? (
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <button onClick={()=>{setShowRegister(false); setShowLogin(true);}} className="py-2 bg-blue-600 text-white rounded-xl text-[10px] font-black uppercase">登录</button>
+                                        <button onClick={()=>{setShowLogin(false); setShowRegister(true);}} className="py-2 bg-white border-2 border-slate-200 rounded-xl text-[10px] font-black uppercase">注册</button>
+                                    </div>
+                                ) : (
+                                    <button onClick={handleLogout} className="w-full py-2 bg-white border-2 border-slate-200 rounded-xl text-[10px] font-black uppercase hover:border-red-300 hover:text-red-600 transition-all">退出登录</button>
+                                )}
                             </div>
                         </div>
                     </aside>
@@ -267,7 +563,9 @@
                                 <header className="flex justify-between items-end">
                                     <div>
                                         <h2 className="text-3xl font-black tracking-tight">智能细胞检索</h2>
-                                        <p className="text-slate-400 font-medium">支持海量单细胞数据的毫秒级相似度比对</p>
+                                        <p className="text-slate-400 font-medium">
+                                            {isGuest ? '访客模式：可使用公共演示数据集进行检索' : '支持海量单细胞数据的毫秒级相似度比对'}
+                                        </p>
                                     </div>
                                     <div className="flex bg-white p-1 rounded-xl border shadow-sm">
                                         <button onClick={()=>setSearchType('id')} className={`px-4 py-2 rounded-lg text-xs font-black transition-all ${searchType==='id'?'bg-slate-900 text-white shadow-md':'text-slate-400'}`}>CELL ID</button>
@@ -283,10 +581,43 @@
                                                 <select className="w-full p-4 bg-slate-50 rounded-xl font-bold text-sm border-none focus:ring-2 ring-blue-500" value={selectedDsId} onChange={e=>setSelectedDsId(e.target.value)}>
                                                     {datasets.map(d=><option key={d.id} value={d.id}>{d.name}</option>)}
                                                 </select>
-                                                <select className="w-full p-4 bg-slate-50 rounded-xl font-bold text-sm border-none focus:ring-2 ring-blue-500" value={selectedIdxId} onChange={e=>setSelectedIdxId(e.target.value)}>
-                                                    {readyIndices.map(i=><option key={i.id} value={i.id}>{i.index_type.toUpperCase()} ({i.metric})</option>)}
-                                                    {readyIndices.length === 0 && <option value="">无可用索引</option>}
-                                                </select>
+                                                {!indexCompareMode ? (
+                                                    <select className="w-full p-4 bg-slate-50 rounded-xl font-bold text-sm border-none focus:ring-2 ring-blue-500" value={selectedIdxId} onChange={e=>setSelectedIdxId(e.target.value)}>
+                                                        {readyIndices.map(i=><option key={i.id} value={i.id}>{i.index_type.toUpperCase()} ({i.metric})</option>)}
+                                                        {readyIndices.length === 0 && <option value="">无可用索引</option>}
+                                                    </select>
+                                                ) : (
+                                                    <div className="space-y-2 p-3 bg-blue-50 rounded-xl border border-blue-100">
+                                                        <p className="text-[9px] font-bold text-blue-700">勾选要对比的索引（至少 2 个；未勾选则用全部 ready 索引）</p>
+                                                        {readyIndices.length === 0 && <p className="text-xs text-slate-400">无可用索引</p>}
+                                                        {readyIndices.map(i => (
+                                                            <label key={i.id} className="flex items-center gap-2 p-2 bg-white rounded-lg cursor-pointer hover:border-blue-300 border border-transparent">
+                                                                <input
+                                                                    type="checkbox"
+                                                                    checked={compareIndexIds.includes(String(i.id))}
+                                                                    onChange={() => toggleCompareIndex(i.id)}
+                                                                    className="rounded border-slate-300"
+                                                                />
+                                                                <span className="text-xs font-black uppercase">{i.index_type}</span>
+                                                                <span className="text-[10px] text-slate-400">({i.metric})</span>
+                                                            </label>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                                <label className="flex items-center gap-2 p-3 bg-slate-50 rounded-xl cursor-pointer hover:bg-slate-100 transition-colors">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={indexCompareMode}
+                                                        onChange={e => {
+                                                            setIndexCompareMode(e.target.checked);
+                                                            setCompareResults(null);
+                                                            setSearchResults(null);
+                                                        }}
+                                                        className="rounded border-slate-300"
+                                                    />
+                                                    <span className="text-xs font-black text-slate-700">索引对比模式</span>
+                                                    <span className="text-[9px] text-slate-400">并行检索，对比耗时与 Top-10 重叠率</span>
+                                                </label>
                                             </div>
                                         </section>
 
@@ -344,10 +675,10 @@
                                             </div>
                                         </section>
 
-                                        <button onClick={runSearch} disabled={searchLoading || !selectedIdxId} className="w-full py-5 btn-primary rounded-3xl font-black text-lg shadow-xl shadow-blue-500/20 flex items-center justify-center gap-3 disabled:opacity-30">
-                                            {searchLoading ? <div className="spinner !border-white"></div> : '执行检索引擎'}
+                                        <button onClick={runSearch} disabled={searchLoading || (indexCompareMode ? readyIndices.length < 2 : !selectedIdxId)} className="w-full py-5 btn-primary rounded-3xl font-black text-lg shadow-xl shadow-blue-500/20 flex items-center justify-center gap-3 disabled:opacity-30">
+                                            {searchLoading ? <div className="spinner !border-white"></div> : (indexCompareMode ? '执行多索引对比' : '执行检索引擎')}
                                         </button>
-                                        <button onClick={runRandom} disabled={searchLoading || !selectedIdxId} className="w-full py-4 bg-white border-2 border-slate-900 rounded-3xl font-black text-slate-900 hover:bg-slate-50 transition-all">🎲 随机测试</button>
+                                        <button onClick={runRandom} disabled={searchLoading || (indexCompareMode ? readyIndices.length < 2 : !selectedIdxId)} className="w-full py-4 bg-white border-2 border-slate-900 rounded-3xl font-black text-slate-900 hover:bg-slate-50 transition-all">🎲 随机测试</button>
                                     </div>
 
                                     <div className="col-span-8 flex flex-col space-y-6">
@@ -364,15 +695,71 @@
                                         </div>
 
                                         <div className="card flex-1 min-h-[500px] p-8">
-                                            {!searchResults ? (
+                                            {compareResults ? (
+                                                <div className="space-y-6">
+                                                    <div className="flex flex-wrap justify-between items-center gap-4 border-b pb-6">
+                                                        <div>
+                                                            <h4 className="font-black text-xl italic underline decoration-purple-500 decoration-4">INDEX COMPARE</h4>
+                                                            <p className="text-xs text-slate-500 mt-1">查询: <strong>{compareResults.query}</strong> · 基线: <strong className="uppercase">{compareResults.baseline_type}</strong> Top-10</p>
+                                                        </div>
+                                                    </div>
+                                                    <div className="overflow-x-auto">
+                                                        <table className="w-full text-sm">
+                                                            <thead className="bg-slate-50 text-[10px] font-black uppercase text-slate-400">
+                                                                <tr>
+                                                                    <th className="text-left p-3">索引类型</th>
+                                                                    <th className="text-left p-3">耗时 (ms)</th>
+                                                                    <th className="text-left p-3">Top-10 重叠</th>
+                                                                    <th className="text-left p-3">相对基线</th>
+                                                                    <th className="text-left p-3">加速比</th>
+                                                                </tr>
+                                                            </thead>
+                                                            <tbody>
+                                                                {compareResults.runs
+                                                                    .slice()
+                                                                    .sort((a, b) => (a.query_time_ms || 0) - (b.query_time_ms || 0))
+                                                                    .map(r => {
+                                                                        const baseline = compareResults.runs.find(x => x.index_type === compareResults.baseline_type);
+                                                                        const speedup = r.query_time_ms && baseline?.query_time_ms
+                                                                            ? (baseline.query_time_ms / r.query_time_ms).toFixed(2)
+                                                                            : '—';
+                                                                        const isBaseline = r.index_type === compareResults.baseline_type;
+                                                                        return (
+                                                                            <tr key={r.index_id} className={`border-t border-slate-100 ${isBaseline ? 'bg-green-50/50' : ''}`}>
+                                                                                <td className="p-3 font-black uppercase">{r.index_type}{isBaseline ? ' (基线)' : ''}</td>
+                                                                                <td className="p-3 font-bold text-blue-600">{(r.query_time_ms || 0).toFixed(2)}</td>
+                                                                                <td className="p-3">{r.overlap_with_baseline}/10</td>
+                                                                                <td className="p-3">
+                                                                                    <span className={`px-2 py-1 rounded-lg text-xs font-black ${r.overlap_pct >= 90 ? 'bg-green-100 text-green-700' : r.overlap_pct >= 70 ? 'bg-yellow-100 text-yellow-700' : 'bg-red-100 text-red-700'}`}>
+                                                                                        {isBaseline ? '100%' : `${r.overlap_pct}%`}
+                                                                                    </span>
+                                                                                </td>
+                                                                                <td className="p-3 font-bold">{isBaseline ? '1.00×' : `${speedup}×`}</td>
+                                                                            </tr>
+                                                                        );
+                                                                    })}
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+                                                    <p className="text-[10px] text-slate-400 leading-relaxed">
+                                                        重叠率 = 该索引 Top-10 细胞 ID 与 {compareResults.baseline_type} 基线的交集占比。无 exact 索引时以第一个参与对比的索引为基线。
+                                                    </p>
+                                                </div>
+                                            ) : !searchResults ? (
                                                 <div className="h-full flex flex-col items-center justify-center text-slate-200">
                                                     <svg className="w-24 h-24 mb-4 opacity-20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.628.283a2 2 0 01-1.131.21l-3.983-.588a2 2 0 00-1.48.223l-1.46.767a2 2 0 01-2.06.06L2 10V4a2 2 0 012-2h8a2 2 0 012 2v3h1a2 2 0 012 2v-3a2 2 0 012-2h1a2 2 0 012 2v11a2 2 0 01-2 2h-1a2 2 0 01-2-2v-5a2 2 0 012-2h1z"/></svg>
                                                     <p className="font-black italic text-xl uppercase tracking-tighter opacity-20">Waiting for query...</p>
                                                 </div>
                                             ) : (
                                                 <div className="space-y-6">
-                                                    <div className="flex justify-between items-center border-b pb-6">
-                                                        <h4 className="font-black text-xl italic underline decoration-blue-500 decoration-4">RESULT SET</h4>
+                                                    <div className="flex flex-wrap justify-between items-center gap-4 border-b pb-6">
+                                                        <div className="flex items-center gap-2">
+                                                            <h4 className="font-black text-xl italic underline decoration-blue-500 decoration-4 mr-4">RESULT SET</h4>
+                                                            <div className="flex bg-slate-100 p-1 rounded-xl">
+                                                                <button onClick={()=>setResultView('viz')} className={`px-4 py-2 rounded-lg text-[10px] font-black uppercase ${resultView==='viz'?'bg-white shadow text-blue-600':'text-slate-400'}`}>可视化</button>
+                                                                <button onClick={()=>setResultView('list')} className={`px-4 py-2 rounded-lg text-[10px] font-black uppercase ${resultView==='list'?'bg-white shadow text-blue-600':'text-slate-400'}`}>详细列表</button>
+                                                            </div>
+                                                        </div>
                                                         <div className="text-right">
                                                             <p className="text-[10px] font-black text-slate-400 uppercase">Search Time</p>
                                                             <p className="font-bold text-blue-600">{searchResults.query_time_ms.toFixed(2)}ms</p>
@@ -384,13 +771,50 @@
                                                             <p className="text-xs text-red-400 mt-2 font-bold uppercase">Tips: 检查你的 Value 是否与该数据集中存在的标签完全一致。</p>
                                                         </div>
                                                     )}
+                                                    {searchResults.results.length > 0 && resultView === 'viz' && (
+                                                        <div className="space-y-4">
+                                                            <p className="text-xs text-slate-500 leading-relaxed">
+                                                                高维向量（如 30 维 PCA）无法直接画图，这里用 <strong>2D 嵌入</strong>（UMAP 或 PCA 前两维）投影到平面：
+                                                                灰色小点为背景细胞，<span className="text-red-500 font-bold">红色大圆环</span> 为查询细胞，彩色圆点为 Top-K 邻居。
+                                                                <strong>点击彩色邻居点</strong>可查看与查询细胞的详细对比。
+                                                            </p>
+                                                            <div className="flex flex-wrap gap-2">
+                                                                {[
+                                                                    ['scatter', '散点图'],
+                                                                    ['similarity', '相似度'],
+                                                                    ['distance', '向量距离'],
+                                                                    ['celltype', '类型分布'],
+                                                                ].map(([k, label]) => (
+                                                                    <button key={k} onClick={()=>setVizTab(k)}
+                                                                        className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase border-2 transition-all ${vizTab===k?'border-blue-600 bg-blue-50 text-blue-600':'border-slate-200 text-slate-400 hover:border-slate-300'}`}>
+                                                                        {label}
+                                                                    </button>
+                                                                ))}
+                                                            </div>
+                                                            <div className="bg-white rounded-[2rem] border border-slate-100 p-4 h-[420px] relative">
+                                                                {vizTab === 'scatter' && !embedData && (
+                                                                    <div className="absolute inset-0 flex items-center justify-center text-slate-300 font-bold text-sm">加载嵌入坐标...</div>
+                                                                )}
+                                                                <canvas id="sviz-scatter" className={`w-full h-full ${vizTab==='scatter'?'block':'hidden'}`}></canvas>
+                                                                <canvas id="sviz-similarity" className={`w-full h-full ${vizTab==='similarity'?'block':'hidden'}`}></canvas>
+                                                                <canvas id="sviz-distance" className={`w-full h-full ${vizTab==='distance'?'block':'hidden'}`}></canvas>
+                                                                <canvas id="sviz-celltype" className={`w-full h-full ${vizTab==='celltype'?'block':'hidden'}`}></canvas>
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                    {searchResults.results.length > 0 && resultView === 'list' && (
                                                     <div className="grid gap-4">
                                                         {searchResults.results.map(r=>(
-                                                            <div key={r.rank} className="p-6 bg-slate-50 rounded-[1.5rem] border border-transparent hover:border-blue-200 hover:bg-white transition-all group">
+                                                            <div key={r.rank}
+                                                                onClick={() => openCellCompare(r)}
+                                                                className="p-6 bg-slate-50 rounded-[1.5rem] border border-transparent hover:border-blue-400 hover:bg-white transition-all group cursor-pointer"
+                                                                title="点击查看与查询细胞的详细对比"
+                                                            >
                                                                 <div className="flex justify-between items-start mb-4">
                                                                     <div>
                                                                         <p className="text-lg font-black text-slate-900">#{r.rank} {r.cell_id}</p>
                                                                         <p className="text-xs font-bold text-blue-600 uppercase">{r.cell_type || 'Unknown Type'}</p>
+                                                                        <p className="text-[9px] text-slate-400 mt-1 font-bold">点击展开对比详情 →</p>
                                                                     </div>
                                                                     <div className="text-right">
                                                                         <p className="text-2xl font-black text-slate-900">{(r.similarity*100).toFixed(2)}%</p>
@@ -407,6 +831,7 @@
                                                             </div>
                                                         ))}
                                                     </div>
+                                                    )}
                                                 </div>
                                             )}
                                         </div>
@@ -442,20 +867,48 @@
                                                 
                                                 <div className="space-y-3 mb-8">
                                                     {indices.filter(i=>i.dataset_id===ds.id).map(i=>(
-                                                        <div key={i.id} className="flex justify-between items-center p-4 bg-slate-50 rounded-2xl border border-slate-100">
-                                                            <div>
+                                                        <div key={i.id} className="flex justify-between items-start gap-3 p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                                                            <div className="min-w-0">
                                                                 <p className="font-black text-xs uppercase">{i.index_type} 索引</p>
-                                                                <p className="text-[10px] text-slate-400 font-bold uppercase">{i.metric} 路经</p>
+                                                                <p className="text-[10px] text-slate-400 font-bold uppercase">{i.metric} 度量</p>
+                                                                {i.status === 'error' && i.params?._error && (
+                                                                    <p className="text-[10px] text-red-500 mt-1 leading-snug break-words">{i.params._error}</p>
+                                                                )}
                                                             </div>
-                                                            <span className={`px-3 py-1 rounded-full text-[10px] font-black uppercase ${i.status==='ready'?'bg-green-100 text-green-600':'bg-yellow-100 text-yellow-600'}`}>{i.status}</span>
+                                                            <span className={`shrink-0 px-3 py-1 rounded-full text-[10px] font-black uppercase ${i.status==='ready'?'bg-green-100 text-green-600':i.status==='error'?'bg-red-100 text-red-600':'bg-yellow-100 text-yellow-600'}`}>{i.status}</span>
                                                         </div>
                                                     ))}
                                                 </div>
 
-                                                <div className="grid grid-cols-2 gap-4">
-                                                    <button onClick={()=>buildIdx(ds.id, 'hnsw')} className="py-3 bg-slate-900 text-white rounded-xl text-[10px] font-black uppercase shadow-lg shadow-slate-900/20">构建 HNSW</button>
-                                                    <button onClick={()=>buildIdx(ds.id, 'exact')} className="py-3 bg-white border-2 border-slate-900 text-slate-900 rounded-xl text-[10px] font-black uppercase">构建精确索引</button>
+                                                <div className="grid grid-cols-2 gap-3">
+                                                    {INDEX_TYPES.map(t => {
+                                                        const existing = indices.filter(i => i.dataset_id === ds.id && i.index_type === t.type);
+                                                        const rec = existing.find(i => i.status === 'ready' || i.status === 'building' || i.status === 'error') || existing[0];
+                                                        const building = existing.some(i => i.status === 'building');
+                                                        const ready = existing.some(i => i.status === 'ready');
+                                                        const errored = rec?.status === 'error';
+                                                        return (
+                                                            <button
+                                                                key={t.type}
+                                                                onClick={() => buildIdx(ds.id, t.type)}
+                                                                disabled={building}
+                                                                title={errored && rec?.params?._error ? rec.params._error : `${t.desc} · ${t.lib}`}
+                                                                className={`relative overflow-hidden rounded-2xl border-2 px-4 py-3.5 text-left transition-all duration-200 hover:-translate-y-0.5 active:translate-y-0 disabled:opacity-60 disabled:hover:translate-y-0 ${t.btn}`}
+                                                            >
+                                                                <span className="block text-[9px] font-bold uppercase tracking-widest opacity-75">{t.lib}</span>
+                                                                <span className="block text-sm font-black mt-0.5">{building ? '构建中…' : t.label}</span>
+                                                                <span className="block text-[9px] font-medium mt-1 opacity-80 leading-snug">{t.desc}</span>
+                                                                {ready && !building && (
+                                                                    <span className="absolute top-2.5 right-2.5 w-2 h-2 rounded-full bg-white/90 ring-2 ring-white/40" title="已就绪" />
+                                                                )}
+                                                                {errored && !building && (
+                                                                    <span className="absolute top-2.5 right-2.5 px-1.5 py-0.5 rounded-md bg-black/20 text-[8px] font-black uppercase">失败</span>
+                                                                )}
+                                                            </button>
+                                                        );
+                                                    })}
                                                 </div>
+                                                <p className="text-[9px] text-slate-400 mt-3 leading-relaxed">FAISS 索引需安装 faiss-cpu。IVF-PQ 在小数据集上会自动降低 PQ 码本精度（nbits）以满足训练要求。</p>
                                             </div>
                                         </div>
                                     ))}
@@ -467,53 +920,337 @@
                             <div className="max-w-4xl mx-auto space-y-8">
                                 <div className="text-center">
                                     <h2 className="text-4xl font-black italic tracking-tighter uppercase">Benchmarking</h2>
-                                    <p className="text-slate-400 font-bold">ANN 加速性能与准确率的可视化对标</p>
+                                    <p className="text-slate-400 font-bold">以 Exact 为基线，对比各 ANN 索引的加速比与 Recall@10</p>
                                 </div>
 
-                                <div className="card p-10 bg-white shadow-2xl relative overflow-hidden">
-                                     <div className="flex gap-8 mb-10">
-                                        <div className="flex-1 p-6 bg-slate-50 rounded-3xl border border-slate-100">
-                                            <label className="text-[10px] font-black text-slate-400 uppercase block mb-2">测试对象</label>
-                                            <p className="font-black text-lg">{datasets.find(d=>d.id==selectedDsId)?.name || '未选'}</p>
+                                <div className="card p-10 bg-white shadow-2xl relative overflow-hidden space-y-8">
+                                    <div className="grid grid-cols-2 gap-6">
+                                        <div className="p-6 bg-slate-50 rounded-3xl border border-slate-100 space-y-2">
+                                            <label className="text-[10px] font-black text-slate-400 uppercase block">测试数据集</label>
+                                            <select
+                                                className="w-full p-3 bg-white rounded-xl font-bold text-sm border border-slate-200"
+                                                value={selectedDsId}
+                                                onChange={e => { setSelectedDsId(e.target.value); setEvalResult(null); setEvalBatchResults(null); }}
+                                            >
+                                                {datasets.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+                                            </select>
                                         </div>
-                                        <div className="flex-1 p-6 bg-slate-50 rounded-3xl border border-slate-100">
-                                            <label className="text-[10px] font-black text-slate-400 uppercase block mb-2">当前算法</label>
-                                            <p className="font-black text-lg text-blue-600 uppercase">{readyIndices[0]?.index_type || '无可用索引'}</p>
+                                        <div className="p-6 bg-slate-50 rounded-3xl border border-slate-100 space-y-2">
+                                            <label className="text-[10px] font-black text-slate-400 uppercase block">ANN 索引</label>
+                                            <select
+                                                className="w-full p-3 bg-white rounded-xl font-bold text-sm border border-slate-200 uppercase"
+                                                value={evalIdxId}
+                                                onChange={e => { setEvalIdxId(e.target.value); setEvalResult(null); }}
+                                                disabled={benchmarkIndices.length === 0}
+                                            >
+                                                {benchmarkIndices.map(i => (
+                                                    <option key={i.id} value={i.id}>{i.index_type.toUpperCase()} ({i.metric})</option>
+                                                ))}
+                                                {benchmarkIndices.length === 0 && <option value="">无 ANN 索引</option>}
+                                            </select>
                                         </div>
-                                     </div>
+                                    </div>
 
-                                     <button 
-                                        onClick={runEval} 
-                                        disabled={evalLoading || !selectedIdxId}
-                                        className="w-full py-6 btn-primary rounded-[2rem] font-black text-2xl shadow-2xl shadow-blue-600/30 flex items-center justify-center gap-4 disabled:opacity-50"
-                                     >
-                                        {evalLoading ? <div className="spinner !w-8 !h-8 !border-white"></div> : '⚡ RUN BENCHMARK'}
-                                     </button>
+                                    {!hasExactBaseline && (
+                                        <div className="p-4 bg-amber-50 border border-amber-200 rounded-2xl text-sm text-amber-800 font-medium">
+                                            请先在「数据与索引」中构建 <strong>Exact</strong> 索引，作为 Recall 计算的 Ground Truth 基线。
+                                        </div>
+                                    )}
 
-                                     {evalResult && (
-                                         <div className="mt-12 grid grid-cols-2 gap-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                                    {hasExactBaseline && benchmarkIndices.length > 0 && (
+                                        <p className="text-xs text-slate-500">
+                                            基线：<strong className="uppercase text-emerald-600">exact</strong>
+                                            {' · '}
+                                            待测：<strong className="uppercase text-blue-600">{selectedEvalIndex?.index_type || '—'}</strong>
+                                            {' · '}
+                                            共 {benchmarkIndices.length} 个 ANN 索引可评测
+                                        </p>
+                                    )}
+
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <button
+                                            onClick={runEval}
+                                            disabled={evalLoading || !evalIdxId || !hasExactBaseline}
+                                            className="py-5 btn-primary rounded-[2rem] font-black text-lg shadow-xl shadow-blue-600/30 flex items-center justify-center gap-3 disabled:opacity-50"
+                                        >
+                                            {evalLoading ? <div className="spinner !w-6 !h-6 !border-white"></div> : '⚡ 评测当前索引'}
+                                        </button>
+                                        <button
+                                            onClick={runEvalBatch}
+                                            disabled={evalLoading || benchmarkIndices.length === 0 || !hasExactBaseline}
+                                            className="py-5 bg-slate-900 text-white rounded-[2rem] font-black text-lg shadow-xl flex items-center justify-center gap-3 disabled:opacity-50 hover:bg-slate-800 transition-colors"
+                                        >
+                                            {evalLoading ? <div className="spinner !w-6 !h-6 !border-white"></div> : '📊 评测全部 ANN'}
+                                        </button>
+                                    </div>
+
+                                    {evalResult && !evalBatchResults && (
+                                        <div className="grid grid-cols-2 gap-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                                            <div className="col-span-2 text-center">
+                                                <span className="px-4 py-1.5 bg-blue-100 text-blue-700 rounded-full text-xs font-black uppercase">
+                                                    {evalResult.index_type} vs exact
+                                                </span>
+                                            </div>
                                             <div className="p-10 bg-slate-950 text-white rounded-[3rem] shadow-xl">
                                                 <p className="text-xs font-black uppercase text-blue-400 mb-2">SPEEDUP RATIO</p>
                                                 <div className="flex items-baseline gap-2">
                                                     <span className="text-6xl font-black">{evalResult.speedup.toFixed(1)}</span>
                                                     <span className="text-2xl font-bold opacity-50">X</span>
                                                 </div>
-                                                <p className="mt-6 text-[10px] font-medium opacity-40 leading-relaxed">相比暴力检索，ANN 算法在当前硬件环境下实现了显著的时间收益。</p>
+                                                <p className="mt-4 text-[10px] font-medium opacity-40">Exact 平均 {evalResult.avg_exact_time_ms?.toFixed(2)} ms · ANN 平均 {evalResult.avg_ann_time_ms?.toFixed(2)} ms</p>
                                             </div>
                                             <div className="p-10 bg-blue-600 text-white rounded-[3rem] shadow-xl">
                                                 <p className="text-xs font-black uppercase text-blue-100 mb-2">RECALL @10</p>
                                                 <div className="flex items-baseline gap-2">
-                                                    <span className="text-6xl font-black">{(evalResult.recall_at_k*100).toFixed(1)}</span>
+                                                    <span className="text-6xl font-black">{(evalResult.recall_at_k * 100).toFixed(1)}</span>
                                                     <span className="text-2xl font-bold opacity-70">%</span>
                                                 </div>
-                                                <p className="mt-6 text-[10px] font-medium opacity-60 leading-relaxed">在 $k=10$ 的设定下，ANN 结果与精确检索结果的交集覆盖率。</p>
+                                                <p className="mt-4 text-[10px] font-medium opacity-60">基于 {evalResult.n_queries} 次随机查询，对比 Exact Top-10</p>
                                             </div>
-                                         </div>
-                                     )}
+                                        </div>
+                                    )}
+
+                                    {evalBatchResults && evalBatchResults.length > 0 && (
+                                        <div className="space-y-4">
+                                            <h4 className="font-black text-lg uppercase tracking-tight">全部 ANN 对比结果</h4>
+                                            <div className="overflow-x-auto rounded-2xl border border-slate-100">
+                                                <table className="w-full text-sm">
+                                                    <thead className="bg-slate-50 text-[10px] font-black uppercase text-slate-400">
+                                                        <tr>
+                                                            <th className="text-left p-3">索引</th>
+                                                            <th className="text-left p-3">Recall@10</th>
+                                                            <th className="text-left p-3">加速比</th>
+                                                            <th className="text-left p-3">ANN 耗时</th>
+                                                            <th className="text-left p-3">Exact 耗时</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        {evalBatchResults
+                                                            .slice()
+                                                            .sort((a, b) => (b.speedup || 0) - (a.speedup || 0))
+                                                            .map(r => (
+                                                                <tr key={r.index_id} className="border-t border-slate-100 hover:bg-slate-50">
+                                                                    <td className="p-3 font-black uppercase">{r.index_type}</td>
+                                                                    <td className="p-3">
+                                                                        <span className={`px-2 py-1 rounded-lg text-xs font-black ${r.recall_at_k >= 0.9 ? 'bg-green-100 text-green-700' : r.recall_at_k >= 0.7 ? 'bg-yellow-100 text-yellow-700' : 'bg-red-100 text-red-700'}`}>
+                                                                            {(r.recall_at_k * 100).toFixed(1)}%
+                                                                        </span>
+                                                                    </td>
+                                                                    <td className="p-3 font-bold">{r.speedup?.toFixed(2)}×</td>
+                                                                    <td className="p-3 text-blue-600 font-bold">{r.avg_ann_time_ms?.toFixed(2)} ms</td>
+                                                                    <td className="p-3 text-slate-500">{r.avg_exact_time_ms?.toFixed(2)} ms</td>
+                                                                </tr>
+                                                            ))}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+
+                        {view === 'users' && isSysAdmin && (
+                            <div className="max-w-5xl mx-auto space-y-8">
+                                <header>
+                                    <h2 className="text-3xl font-black tracking-tight">用户管理</h2>
+                                    <p className="text-slate-400 font-medium">系统管理员可调整用户角色与账号状态</p>
+                                </header>
+                                <div className="card overflow-hidden">
+                                    <table className="w-full text-sm">
+                                        <thead className="bg-slate-50 text-[10px] font-black uppercase text-slate-400">
+                                            <tr>
+                                                <th className="text-left p-4">用户名</th>
+                                                <th className="text-left p-4">邮箱</th>
+                                                <th className="text-left p-4">角色</th>
+                                                <th className="text-left p-4">状态</th>
+                                                <th className="text-left p-4">操作</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {adminUsers.map(u => (
+                                                <tr key={u.id} className="border-t border-slate-100">
+                                                    <td className="p-4 font-bold">{u.username}</td>
+                                                    <td className="p-4 text-slate-500">{u.email}</td>
+                                                    <td className="p-4">
+                                                        <select
+                                                            className="p-2 bg-slate-50 rounded-lg text-xs font-bold border-none"
+                                                            value={u.role}
+                                                            disabled={u.role === 'sysadmin'}
+                                                            onChange={async (e) => {
+                                                                await ScannAPI.updateUser(u.id, { role: e.target.value });
+                                                                loadAdminUsers();
+                                                            }}
+                                                        >
+                                                            {Object.entries(ROLE_LABELS).map(([k,v]) => <option key={k} value={k}>{v}</option>)}
+                                                        </select>
+                                                    </td>
+                                                    <td className="p-4">
+                                                        <button
+                                                            className={`px-3 py-1 rounded-full text-[10px] font-black uppercase ${u.is_active ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}`}
+                                                            disabled={u.role === 'sysadmin'}
+                                                            onClick={async () => {
+                                                                await ScannAPI.updateUser(u.id, { is_active: !u.is_active });
+                                                                loadAdminUsers();
+                                                            }}
+                                                        >{u.is_active ? 'active' : 'disabled'}</button>
+                                                    </td>
+                                                    <td className="p-4">
+                                                        {u.role !== 'sysadmin' && (
+                                                            <button
+                                                                className="text-[10px] font-black uppercase text-red-500 hover:text-red-700"
+                                                                onClick={async () => {
+                                                                    if (!confirm(`确定删除用户 ${u.username}？`)) return;
+                                                                    await ScannAPI.deleteUser(u.id);
+                                                                    loadAdminUsers();
+                                                                }}
+                                                            >删除</button>
+                                                        )}
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                                <div className="p-6 bg-slate-50 rounded-2xl text-xs text-slate-500 leading-relaxed">
+                                    预设测试账号（密码均为 <code className="font-bold">pass123</code>）：
+                                    visitor · normal · expert · labadmin · sysadmin
                                 </div>
                             </div>
                         )}
                     </main>
+
+                    {compareOpen && (
+                        <div className="fixed inset-0 bg-slate-950/60 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={()=>{ setCompareOpen(false); CellCompare.destroyAll(); }}>
+                            <div className="bg-white rounded-[2rem] w-full max-w-5xl max-h-[92vh] overflow-y-auto shadow-2xl" onClick={e=>e.stopPropagation()}>
+                                <div className="sticky top-0 bg-white border-b px-8 py-6 flex justify-between items-start z-10">
+                                    <div>
+                                        <p className="text-[10px] font-black text-blue-500 uppercase tracking-widest mb-1">Cell Comparison</p>
+                                        <h2 className="text-2xl font-black text-slate-900">
+                                            {compareData?.has_query
+                                                ? <><span className="text-red-500">{compareData.query?.cell_id}</span> vs <span className="text-blue-600">{compareData.target?.cell_id}</span></>
+                                                : compareData?.target?.cell_id || compareHit?.cell_id || '细胞详情'}
+                                        </h2>
+                                        {compareHit && (
+                                            <p className="text-xs text-slate-400 mt-1 font-bold">检索排名 #{compareHit.rank}</p>
+                                        )}
+                                    </div>
+                                    <button onClick={()=>{ setCompareOpen(false); CellCompare.destroyAll(); }} className="w-10 h-10 rounded-full bg-slate-100 hover:bg-slate-200 font-black text-slate-500">×</button>
+                                </div>
+
+                                <div className="p-8 space-y-8">
+                                    {compareLoading && (
+                                        <div className="flex justify-center py-20"><div className="spinner"></div></div>
+                                    )}
+                                    {!compareLoading && compareData && (
+                                        <>
+                                            <div className="grid grid-cols-3 gap-4">
+                                                <div className="p-5 bg-red-50 rounded-2xl border border-red-100">
+                                                    <p className="text-[10px] font-black text-red-400 uppercase">相似度</p>
+                                                    <p className="text-3xl font-black text-red-600">
+                                                        {compareData.metrics.similarity != null
+                                                            ? `${(compareData.metrics.similarity * 100).toFixed(2)}%`
+                                                            : compareHit ? `${(compareHit.similarity * 100).toFixed(2)}%` : '—'}
+                                                    </p>
+                                                </div>
+                                                <div className="p-5 bg-blue-50 rounded-2xl border border-blue-100">
+                                                    <p className="text-[10px] font-black text-blue-400 uppercase">L2 距离</p>
+                                                    <p className="text-3xl font-black text-blue-600">
+                                                        {compareData.metrics.distance != null
+                                                            ? compareData.metrics.distance.toFixed(4)
+                                                            : compareHit?.distance?.toFixed(4) ?? '—'}
+                                                    </p>
+                                                </div>
+                                                <div className="p-5 bg-slate-50 rounded-2xl border border-slate-100">
+                                                    <p className="text-[10px] font-black text-slate-400 uppercase">向量维度</p>
+                                                    <p className="text-3xl font-black text-slate-700">{compareData.metrics.n_dims_total}D</p>
+                                                </div>
+                                            </div>
+
+                                            {compareData.has_query && compareData.metadata_rows?.length > 0 && (
+                                                <div>
+                                                    <h3 className="text-sm font-black uppercase text-slate-400 mb-3 tracking-widest">元数据对比</h3>
+                                                    <div className="overflow-hidden rounded-2xl border border-slate-100">
+                                                        <table className="w-full text-sm">
+                                                            <thead className="bg-slate-50 text-[10px] font-black uppercase text-slate-400">
+                                                                <tr>
+                                                                    <th className="text-left p-3">字段</th>
+                                                                    <th className="text-left p-3">查询细胞</th>
+                                                                    <th className="text-left p-3">命中细胞</th>
+                                                                    <th className="text-center p-3">一致</th>
+                                                                </tr>
+                                                            </thead>
+                                                            <tbody>
+                                                                {compareData.metadata_rows.map(row => (
+                                                                    <tr key={row.field} className={`border-t border-slate-50 ${row.match ? '' : 'bg-amber-50/50'}`}>
+                                                                        <td className="p-3 font-bold text-slate-600">{row.field}</td>
+                                                                        <td className="p-3 text-red-600 font-medium">{String(row.query_value ?? '—')}</td>
+                                                                        <td className="p-3 text-blue-600 font-medium">{String(row.target_value ?? '—')}</td>
+                                                                        <td className="p-3 text-center">{row.match ? '✓' : '≠'}</td>
+                                                                    </tr>
+                                                                ))}
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {!compareData.has_query && (
+                                                <div className="p-4 bg-amber-50 rounded-xl text-xs text-amber-800 font-medium">
+                                                    当前为向量检索模式，无单一查询细胞。下方展示命中细胞 <strong>{compareData.target?.cell_id}</strong> 的向量与元数据详情。
+                                                </div>
+                                            )}
+
+                                            {!compareData.has_query && compareData.target?.metadata && (
+                                                <div className="flex flex-wrap gap-2">
+                                                    {Object.entries(compareData.target.metadata).map(([k,v]) => (
+                                                        <span key={k} className="px-3 py-1 bg-slate-50 border rounded-lg text-xs font-bold text-slate-600">
+                                                            <span className="text-slate-400 uppercase mr-1">{k}:</span>{String(v)}
+                                                        </span>
+                                                    ))}
+                                                </div>
+                                            )}
+
+                                            <div className="grid grid-cols-2 gap-6">
+                                                <div className="h-64"><canvas id="cmp-map"></canvas></div>
+                                                <div className="h-64"><canvas id="cmp-vector"></canvas></div>
+                                            </div>
+                                            {compareData.has_query && (
+                                                <div className="h-56"><canvas id="cmp-delta"></canvas></div>
+                                            )}
+                                        </>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {(showLogin || showRegister) && (
+                        <div className="fixed inset-0 bg-slate-950/60 backdrop-blur-sm z-50 flex items-center justify-center p-6" onClick={()=>{setShowLogin(false); setShowRegister(false);}}>
+                            <div className="bg-white p-10 rounded-[2rem] w-full max-w-md shadow-2xl" onClick={e=>e.stopPropagation()}>
+                                <div className="text-center mb-8">
+                                    <h1 className="text-3xl font-black italic text-slate-900 leading-none">SCANN<span className="text-blue-600">.</span></h1>
+                                    <p className="text-slate-400 font-bold text-sm mt-2">{showRegister ? '创建新账号' : '登录以使用完整功能'}</p>
+                                </div>
+                                {showLogin ? (
+                                    <form onSubmit={handleLogin} className="space-y-4">
+                                        <input name="username" placeholder="用户名" defaultValue="normal" className="w-full p-4 bg-slate-100 rounded-2xl font-bold border-none focus:ring-2 ring-blue-500 outline-none" />
+                                        <input name="password" type="password" placeholder="密码" defaultValue="pass123" className="w-full p-4 bg-slate-100 rounded-2xl font-bold border-none focus:ring-2 ring-blue-500 outline-none" />
+                                        <button className="w-full py-4 btn-primary rounded-2xl font-black text-lg">登录</button>
+                                        <p className="text-center text-xs text-slate-400">还没有账号？ <button type="button" className="text-blue-600 font-bold" onClick={()=>{setShowLogin(false); setShowRegister(true);}}>立即注册</button></p>
+                                    </form>
+                                ) : (
+                                    <form onSubmit={handleRegister} className="space-y-4">
+                                        <input name="username" placeholder="用户名" required className="w-full p-4 bg-slate-100 rounded-2xl font-bold border-none focus:ring-2 ring-blue-500 outline-none" />
+                                        <input name="email" type="email" placeholder="邮箱" required className="w-full p-4 bg-slate-100 rounded-2xl font-bold border-none focus:ring-2 ring-blue-500 outline-none" />
+                                        <input name="password" type="password" placeholder="密码" required className="w-full p-4 bg-slate-100 rounded-2xl font-bold border-none focus:ring-2 ring-blue-500 outline-none" />
+                                        <button className="w-full py-4 btn-primary rounded-2xl font-black text-lg">注册</button>
+                                        <p className="text-center text-xs text-slate-400">已有账号？ <button type="button" className="text-blue-600 font-bold" onClick={()=>{setShowRegister(false); setShowLogin(true);}}>去登录</button></p>
+                                    </form>
+                                )}
+                            </div>
+                        </div>
+                    )}
                 </div>
             );
         };

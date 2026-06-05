@@ -4,14 +4,19 @@ import os
 import numpy as np
 import pandas as pd
 from flask import Blueprint, request, jsonify, current_app
-from flask_login import login_required, current_user
+from flask_login import current_user
 from werkzeug.utils import secure_filename
 
 from ..models import db, Dataset, AnnIndex
+from ..decorators import login_required_api
+from ..permissions import (
+    visible_datasets_query, get_accessible_dataset, can_manage_data,
+)
 from .loader import (
     validate_h5ad, load_dataset, cache_dataset,
     get_cached_dataset, evict_cache, _dataset_cache,
 )
+from ..index.manager import effective_index_status
 
 data_bp = Blueprint('data', __name__)
 
@@ -25,8 +30,10 @@ _PRIORITY_COLS = ['cell_type', 'disease', 'AgeGroup', 'donor_id',
 # ──────────────────────────────────────────────
 
 @data_bp.route('/upload', methods=['POST'])
-@login_required
+@login_required_api
 def upload_dataset():
+    if not can_manage_data():
+        return jsonify({'error': '访客无权上传数据，请先登录'}), 403
     if 'file' not in request.files:
         return jsonify({'error': '未选择文件'}), 400
 
@@ -85,25 +92,8 @@ def upload_dataset():
 # ──────────────────────────────────────────────
 
 @data_bp.route('/', methods=['GET'])
-@login_required
 def list_datasets():
-    # 逻辑：
-    # 1. sysadmin: 看到所有
-    # 2. labadmin: 看到实验室成员上传的所有 (简化为当前看到所有，或后续增加 lab_id)
-    # 3. expert/normal: 看到自己上传的 + 公共的 (upload_by 为空或特定标记)
-    # 4. visitor: 只能看到公共演示数据
-    
-    query = Dataset.query
-    
-    if current_user.role == 'visitor':
-        # 访客只能看到 metadata 标记为 demo 或 upload_by 为空的(演示数据)
-        query = query.filter(Dataset.upload_by.is_(None))
-    elif current_user.role in ['normal', 'expert']:
-        # 普通用户和专家看到自己的 + 演示数据
-        query = query.filter((Dataset.upload_by == current_user.id) | (Dataset.upload_by.is_(None)))
-    # sysadmin 和 labadmin 看到所有 (当前模型下暂无 lab 划分，所以 labadmin 权限等同看到全局)
-    
-    datasets = query.order_by(Dataset.created_at.desc()).all()
+    datasets = visible_datasets_query().order_by(Dataset.created_at.desc()).all()
     return jsonify([_dataset_to_dict(d) for d in datasets])
 
 
@@ -112,9 +102,10 @@ def list_datasets():
 # ──────────────────────────────────────────────
 
 @data_bp.route('/<int:dataset_id>', methods=['GET'])
-@login_required
 def get_dataset(dataset_id):
-    dataset = Dataset.query.get_or_404(dataset_id)
+    dataset, err, code = get_accessible_dataset(dataset_id)
+    if err:
+        return err, code
     data    = _ensure_cached(dataset_id, dataset.file_path)
 
     # 计算所有列的唯一值分布
@@ -139,9 +130,14 @@ def get_dataset(dataset_id):
 # ──────────────────────────────────────────────
 
 @data_bp.route('/<int:dataset_id>', methods=['DELETE'])
-@login_required
+@login_required_api
 def delete_dataset(dataset_id):
-    dataset = Dataset.query.get_or_404(dataset_id)
+    dataset, err, code = get_accessible_dataset(dataset_id)
+    if err:
+        return err, code
+    from ..permissions import effective_role
+    if effective_role() not in ('sysadmin', 'labadmin') and dataset.upload_by != current_user.id:
+        return jsonify({'error': '无权删除该数据集'}), 403
 
     # 删除关联索引文件
     for idx in dataset.indexes:
@@ -165,9 +161,10 @@ def delete_dataset(dataset_id):
 # ──────────────────────────────────────────────
 
 @data_bp.route('/<int:dataset_id>/cells', methods=['GET'])
-@login_required
 def list_cells(dataset_id):
-    dataset  = Dataset.query.get_or_404(dataset_id)
+    dataset, err, code = get_accessible_dataset(dataset_id)
+    if err:
+        return err, code
     page     = max(1, int(request.args.get('page', 1)))
     per_page = min(200, max(1, int(request.args.get('per_page', 50))))
 
@@ -200,13 +197,132 @@ def list_cells(dataset_id):
 
 
 # ──────────────────────────────────────────────
+# 两细胞对比（查询 vs 命中）
+# ──────────────────────────────────────────────
+
+@data_bp.route('/<int:dataset_id>/cells/compare', methods=['POST'])
+def compare_cells(dataset_id):
+    """返回查询细胞与命中细胞的元数据、向量维度对比及嵌入坐标。"""
+    dataset, err, code = get_accessible_dataset(dataset_id)
+    if err:
+        return err, code
+
+    body = request.get_json() or {}
+    query_cell_id  = (body.get('query_cell_id') or '').strip()
+    target_cell_id = (body.get('target_cell_id') or '').strip()
+    search_distance  = body.get('search_distance')
+    search_similarity = body.get('search_similarity')
+
+    if not target_cell_id:
+        return jsonify({'error': '缺少 target_cell_id'}), 400
+
+    data     = _ensure_cached(dataset_id, dataset.file_path)
+    obs      = data['obs']
+    vectors  = data['vectors']
+    cell_ids = data['cell_ids']
+
+    try:
+        ti = cell_ids.index(target_cell_id)
+    except ValueError:
+        return jsonify({'error': f'未找到细胞 {target_cell_id}'}), 404
+
+    target_snap = _cell_snapshot(cell_ids, obs, ti)
+    query_snap  = None
+    qi          = None
+
+    if query_cell_id and query_cell_id not in ('Vector', ''):
+        try:
+            qi = cell_ids.index(query_cell_id)
+            query_snap = _cell_snapshot(cell_ids, obs, qi)
+        except ValueError:
+            pass
+
+    metadata_rows = []
+    if query_snap:
+        for col in obs.columns:
+            qv = query_snap['metadata'].get(col)
+            tv = target_snap['metadata'].get(col)
+            metadata_rows.append({
+                'field': col,
+                'query_value': qv,
+                'target_value': tv,
+                'match': qv == tv,
+            })
+
+    preview_dims = min(15, vectors.shape[1])
+    vector_dims  = []
+    metrics      = {
+        'n_dims_total': int(vectors.shape[1]),
+        'distance':     search_distance,
+        'similarity':   search_similarity,
+    }
+
+    if query_snap:
+        qv = vectors[qi]
+        tv = vectors[ti]
+        dist = float(np.linalg.norm(qv - tv))
+        metrics['distance']   = dist
+        metrics['similarity'] = round(1.0 / (1.0 + dist), 6)
+        for d in range(preview_dims):
+            vector_dims.append({
+                'dim':    d + 1,
+                'query':  float(qv[d]),
+                'target': float(tv[d]),
+                'delta':  float(abs(qv[d] - tv[d])),
+            })
+    else:
+        tv = vectors[ti]
+        for d in range(preview_dims):
+            vector_dims.append({
+                'dim': d + 1, 'query': None,
+                'target': float(tv[d]), 'delta': None,
+            })
+
+    embed_2d = {'target': _embed_2d(data, vectors, ti)}
+    if qi is not None:
+        embed_2d['query'] = _embed_2d(data, vectors, qi)
+
+    return jsonify({
+        'query':         query_snap,
+        'target':        target_snap,
+        'metadata_rows': metadata_rows,
+        'vector_dims':   vector_dims,
+        'metrics':       metrics,
+        'embed_2d':      embed_2d,
+        'has_query':     query_snap is not None,
+    })
+
+
+def _cell_snapshot(cell_ids, obs, idx: int) -> dict:
+    row = obs.iloc[idx]
+    return {
+        'cell_id':  cell_ids[idx],
+        'metadata': {col: _safe_val(row[col]) for col in obs.columns},
+        'cell_type': _safe_val(row['cell_type']) if 'cell_type' in obs.columns else None,
+    }
+
+
+def _embed_2d(data: dict, vectors, idx: int) -> dict:
+    out = {
+        'pca_x': float(vectors[idx, 0]),
+        'pca_y': float(vectors[idx, 1]),
+    }
+    umap = data.get('umap_coords')
+    if umap is not None:
+        out['umap_x'] = float(umap[idx, 0])
+        out['umap_y'] = float(umap[idx, 1])
+    return out
+
+
+# ──────────────────────────────────────────────
 # UMAP 坐标（供可视化）
 # ──────────────────────────────────────────────
 
 @data_bp.route('/<int:dataset_id>/umap_data', methods=['GET'])
-@login_required
 def get_umap_data(dataset_id):
-    dataset = Dataset.query.get_or_404(dataset_id)
+    dataset, err, code = get_accessible_dataset(dataset_id)
+    if err:
+        return err, code
     data    = _ensure_cached(dataset_id, dataset.file_path)
 
     if data['umap_coords'] is None:
@@ -237,9 +353,10 @@ def get_umap_data(dataset_id):
 # ──────────────────────────────────────────────
 
 @data_bp.route('/<int:dataset_id>/pca_data', methods=['GET'])
-@login_required
 def get_pca_data(dataset_id):
-    dataset = Dataset.query.get_or_404(dataset_id)
+    dataset, err, code = get_accessible_dataset(dataset_id)
+    if err:
+        return err, code
     data    = _ensure_cached(dataset_id, dataset.file_path)
 
     vectors  = data['vectors']
@@ -305,7 +422,7 @@ def _index_to_dict(i: AnnIndex) -> dict:
         'id':         i.id,
         'index_type': i.index_type,
         'metric':     i.metric,
-        'status':     i.status,
+        'status':     effective_index_status(i),
         'build_time': i.build_time,
         'created_at': i.created_at.isoformat(),
     }

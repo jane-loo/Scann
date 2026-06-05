@@ -1,11 +1,10 @@
 from flask import request, jsonify
-from flask_login import login_required
 from ..models import db, User
-from ..decorators import sysadmin_required
+from ..decorators import sysadmin_required, login_required_api
 from . import admin_bp
 
 @admin_bp.route('/users', methods=['GET'])
-@login_required
+@login_required_api
 @sysadmin_required
 def get_users():
     """获取所有用户列表 (仅限 sysadmin)"""
@@ -21,7 +20,7 @@ def get_users():
     return jsonify(user_list)
 
 @admin_bp.route('/users/<int:user_id>', methods=['PUT'])
-@login_required
+@login_required_api
 @sysadmin_required
 def update_user(user_id):
     """修改用户角色或状态 (仅限 sysadmin)"""
@@ -43,7 +42,7 @@ def update_user(user_id):
     return jsonify({'message': '更新成功', 'user': {'id': user.id, 'role': user.role, 'is_active': user.is_active}})
 
 @admin_bp.route('/users/<int:user_id>', methods=['DELETE'])
-@login_required
+@login_required_api
 @sysadmin_required
 def delete_user(user_id):
     """物理删除用户及其关联数据 (仅限 sysadmin)"""

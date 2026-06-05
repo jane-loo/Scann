@@ -1,5 +1,5 @@
 /**
- * Scann API 封装模块
+ * Scann API ??????
  */
 const API_BASE = '';
 
@@ -11,13 +11,13 @@ const api = axios.create({
     }
 });
 
-// 响应拦截器：处理 401 和错误
+// ??????????????? 401 ?????
 api.interceptors.response.use(
     response => response.data,
     error => {
         if (error.response && error.response.status === 401) {
-            // 可以在这里触发跳转到登录页的操作
-            console.warn('未授权，请先登录');
+            // ??????????????????????????
+            console.warn('?????????????');
         }
         return Promise.reject(error.response ? error.response.data : error);
     }
@@ -38,6 +38,9 @@ const ScannAPI = {
     getDatasetDetail: (id) => api.get(`/api/datasets/${id}`),
     deleteDataset: (id) => api.delete(`/api/datasets/${id}`),
     getDatasetCells: (id) => api.get(`/api/datasets/${id}/cells`),
+    getUmapData: (id) => api.get(`/api/datasets/${id}/umap_data`),
+    getPcaData: (id) => api.get(`/api/datasets/${id}/pca_data`),
+    compareCells: (datasetId, data) => api.post(`/api/datasets/${datasetId}/cells/compare`, data),
 
     // Indexes
     buildIndex: (data) => api.post('/api/indexes/build', data),
@@ -52,6 +55,7 @@ const ScannAPI = {
 
     // Evaluation
     runEvaluation: (datasetId, data) => api.post(`/api/evaluate/${datasetId}`, data),
+    runBatchEvaluation: (datasetId, data) => api.post(`/api/evaluate/${datasetId}/batch`, data),
     getEvaluationReport: (datasetId) => api.get(`/api/evaluate/${datasetId}/report`),
 
     // Admin

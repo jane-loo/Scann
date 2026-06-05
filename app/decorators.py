@@ -2,6 +2,15 @@ from functools import wraps
 from flask import abort, jsonify
 from flask_login import current_user
 
+def login_required_api(f):
+    """必须登录（访客未登录不可用）。"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not current_user.is_authenticated:
+            return jsonify({'error': '请先登录'}), 401
+        return f(*args, **kwargs)
+    return decorated_function
+
 def admin_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):

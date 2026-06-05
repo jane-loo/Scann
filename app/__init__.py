@@ -57,6 +57,9 @@ def create_app(test_config: dict = None):
     # 7.1 启动时预加载已有数据集到内存缓存（TESTING 模式跳过）
     if not app.config.get('TESTING', False):
         _preload_datasets(app)
+        with app.app_context():
+            from .index.manager import maintain_index_records
+            maintain_index_records(app.config['INDEX_FOLDER'])
 
     return app
 

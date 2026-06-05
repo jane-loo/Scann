@@ -12,7 +12,7 @@ class User(UserMixin, db.Model):
     username   = db.Column(db.String(64), unique=True, nullable=False)
     email      = db.Column(db.String(120), unique=True, nullable=False)
     password   = db.Column(db.String(256), nullable=False)
-    role       = db.Column(db.String(16), default='user')   # 'user' | 'admin'
+    role       = db.Column(db.String(16), default='normal')
     is_active  = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 

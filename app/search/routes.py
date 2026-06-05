@@ -1,16 +1,22 @@
 from flask import request, jsonify
-from flask_login import login_required, current_user
+from flask_login import current_user
 from .engine import SearchEngine
 from . import search_bp
 import json
 from ..models import QueryHistory
+from ..decorators import login_required_api
+from ..permissions import get_accessible_dataset
 
 engine = SearchEngine()
 
+
+def _check_search_access(dataset_id: int):
+    return get_accessible_dataset(int(dataset_id))
+
+
 @search_bp.route('/by_cell_id', methods=['POST'])
-@login_required
 def search_by_cell_id():
-    """按 Cell ID 检索相似细胞"""
+    """按 Cell ID 检索相似细胞（访客可检索公共演示数据）"""
     data = request.get_json() or {}
     dataset_id = data.get('dataset_id')
     cell_id    = data.get('cell_id')
@@ -21,16 +27,20 @@ def search_by_cell_id():
     if not all([dataset_id, cell_id, index_id]):
         return jsonify({'error': '缺少必要参数 (dataset_id, cell_id, index_id)'}), 400
 
+    _, err, code = _check_search_access(dataset_id)
+    if err:
+        return err, code
+
+    user_id = current_user.id if current_user.is_authenticated else None
     try:
-        res = engine.search_by_cell_id(int(dataset_id), cell_id, int(index_id), 
-                                      top_k=int(top_k), user_id=current_user.id, filters=filters)
+        res = engine.search_by_cell_id(int(dataset_id), cell_id, int(index_id),
+                                      top_k=int(top_k), user_id=user_id, filters=filters)
         return jsonify(res)
     except Exception as e:
         return jsonify({'error': str(e)}), 400
 
 
 @search_bp.route('/by_vector', methods=['POST'])
-@login_required
 def search_by_vector():
     """按向量检索相似细胞"""
     data = request.get_json() or {}
@@ -43,16 +53,20 @@ def search_by_vector():
     if not all([dataset_id, vector, index_id]):
         return jsonify({'error': '缺少必要参数 (dataset_id, vector, index_id)'}), 400
 
+    _, err, code = _check_search_access(dataset_id)
+    if err:
+        return err, code
+
+    user_id = current_user.id if current_user.is_authenticated else None
     try:
-        res = engine.search_by_vector(int(dataset_id), vector, int(index_id), 
-                                     top_k=int(top_k), user_id=current_user.id, filters=filters)
+        res = engine.search_by_vector(int(dataset_id), vector, int(index_id),
+                                     top_k=int(top_k), user_id=user_id, filters=filters)
         return jsonify(res)
     except Exception as e:
         return jsonify({'error': str(e)}), 400
 
 
 @search_bp.route('/random', methods=['POST'])
-@login_required
 def search_random():
     """随机选择一个细胞进行检索（用于演示）"""
     data = request.get_json() or {}
@@ -64,22 +78,28 @@ def search_random():
     if not all([dataset_id, index_id]):
         return jsonify({'error': '缺少必要参数 (dataset_id, index_id)'}), 400
 
+    _, err, code = _check_search_access(dataset_id)
+    if err:
+        return err, code
+
+    user_id = current_user.id if current_user.is_authenticated else None
     try:
-        res = engine.search_random(int(dataset_id), int(index_id), 
-                                  top_k=int(top_k), user_id=current_user.id, filters=filters)
+        res = engine.search_random(int(dataset_id), int(index_id),
+                                  top_k=int(top_k), user_id=user_id, filters=filters)
         return jsonify(res)
     except Exception as e:
         return jsonify({'error': str(e)}), 400
 
+
 @search_bp.route('/history', methods=['GET'])
-@login_required
+@login_required_api
 def get_history():
     """获取当前用户的查询历史"""
     limit = request.args.get('limit', 50, type=int)
     history = QueryHistory.query.filter_by(user_id=current_user.id)\
                                 .order_by(QueryHistory.created_at.desc())\
                                 .limit(limit).all()
-    
+
     return jsonify([{
         'id': h.id,
         'dataset_id': h.dataset_id,

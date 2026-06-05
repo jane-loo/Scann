@@ -4,7 +4,7 @@ import json
 import pandas as pd
 from ..models import db, Dataset, AnnIndex, QueryHistory
 from ..data.loader import _dataset_cache, load_dataset, cache_dataset
-from ..index.manager import search_index
+from ..index.manager import search_index, index_is_usable, effective_index_status
 
 class SearchEngine:
     def _ensure_data(self, dataset_id: int):
@@ -52,7 +52,12 @@ class SearchEngine:
         data = self._ensure_data(dataset_id)
         random_idx = np.random.randint(0, len(data['cell_ids']))
         cell_id = data['cell_ids'][random_idx]
-        return self.search_by_cell_id(dataset_id, cell_id, index_id, top_k, user_id, filters=filters)
+        result = self.search_by_cell_id(
+            dataset_id, cell_id, index_id, top_k, user_id, filters=filters
+        )
+        result['query_cell_id'] = cell_id
+        result['query_type'] = 'random'
+        return result
 
     def _do_search(self, dataset_id: int, query_vector: np.ndarray, index_id: int, 
                    top_k: int, user_id: int, query_type: str, query_input: str,
@@ -60,9 +65,10 @@ class SearchEngine:
         ann_index = db.session.get(AnnIndex, index_id)
         if not ann_index or ann_index.dataset_id != dataset_id:
             raise ValueError(f"索引 {index_id} 不存在或与数据集不匹配")
-        
-        if ann_index.status != 'ready':
-            raise ValueError(f"索引 {index_id} 尚未就绪 (状态: {ann_index.status})")
+
+        if not index_is_usable(ann_index):
+            status = effective_index_status(ann_index)
+            raise ValueError(f"索引 {index_id} 不可用 (状态: {status})，请先构建索引")
 
         # 为了排除自身或进行过滤，扩大搜索范围
         search_k = top_k

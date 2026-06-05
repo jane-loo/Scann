@@ -51,6 +51,106 @@ def _ensure_vectors(dataset_id: int) -> np.ndarray:
     return _dataset_cache[dataset_id]['vectors']
 
 
+def index_is_usable(ann_index: AnnIndex) -> bool:
+    """索引记录是否对应真实可用的磁盘文件。"""
+    return bool(
+        ann_index.status == 'ready'
+        and ann_index.index_file
+        and os.path.exists(ann_index.index_file)
+    )
+
+
+def effective_index_status(ann_index: AnnIndex) -> str:
+    """返回对外展示/使用的索引状态。"""
+    if ann_index.status == 'ready' and not index_is_usable(ann_index):
+        return 'error'
+    return ann_index.status
+
+
+def remove_index_record(ann_index: AnnIndex) -> None:
+    """删除索引文件、缓存与数据库记录（不 commit）。"""
+    index_id = ann_index.id
+    if ann_index.index_file and os.path.exists(ann_index.index_file):
+        try:
+            os.remove(ann_index.index_file)
+        except OSError:
+            pass
+
+    params_dict = json.loads(ann_index.params or '{}')
+    if params_dict.get('joint'):
+        mapping_file = params_dict.get('mapping_file')
+        if mapping_file and os.path.exists(mapping_file):
+            try:
+                os.remove(mapping_file)
+            except OSError:
+                pass
+
+    evict_index_cache(index_id)
+    db.session.delete(ann_index)
+
+
+def remove_indexes_for_dataset(dataset_id: int, index_type: str) -> None:
+    """删除同一数据集下指定类型的全部旧索引（重建前替换）。"""
+    existing = AnnIndex.query.filter_by(
+        dataset_id=dataset_id,
+        index_type=index_type,
+    ).all()
+    for idx in existing:
+        remove_index_record(idx)
+    if existing:
+        db.session.commit()
+
+
+def maintain_index_records(index_folder: str | None = None) -> None:
+    """
+    1. 将已有磁盘文件但 DB 仍为 building 的索引修正为 ready
+    2. 将长时间 building 且无文件的索引标记为 error
+    3. 清理历史“空 ready”索引，合并同类型重复记录
+    """
+    from collections import defaultdict
+    from datetime import datetime, timedelta
+
+    if index_folder is None:
+        from flask import has_app_context, current_app
+        if has_app_context():
+            index_folder = current_app.config['INDEX_FOLDER']
+        else:
+            return
+
+    for idx in AnnIndex.query.filter(AnnIndex.status == 'building').all():
+        expected = _index_file_path(
+            index_folder, idx.dataset_id, idx.id, idx.index_type
+        )
+        if os.path.exists(expected):
+            idx.status     = 'ready'
+            idx.index_file = expected
+        elif idx.created_at and datetime.utcnow() - idx.created_at > timedelta(seconds=15):
+            idx.status = 'error'
+            params = json.loads(idx.params or '{}')
+            params['_error'] = '构建未完成或已中断，请重新构建'
+            idx.params = json.dumps(params, ensure_ascii=False)
+    db.session.commit()
+
+    orphans = AnnIndex.query.filter(AnnIndex.status == 'ready').all()
+    for idx in orphans:
+        if not index_is_usable(idx):
+            remove_index_record(idx)
+    db.session.commit()
+
+    groups: dict[tuple[int, str], list[AnnIndex]] = defaultdict(list)
+    for idx in AnnIndex.query.order_by(AnnIndex.created_at.desc()).all():
+        groups[(idx.dataset_id, idx.index_type)].append(idx)
+
+    for items in groups.values():
+        if len(items) <= 1:
+            continue
+        keep = next((i for i in items if index_is_usable(i)), items[0])
+        for stale in items:
+            if stale.id != keep.id:
+                remove_index_record(stale)
+    db.session.commit()
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # 构建（同步，在独立线程中调用）
 # ──────────────────────────────────────────────────────────────────────────────

@@ -39,6 +39,38 @@ class FaissIndex:
             return faiss.IndexFlatIP(dim)
         return faiss.IndexFlatL2(dim)
 
+    @staticmethod
+    def _adapt_ivf_nlist(n: int, nlist: int) -> int:
+        """IVF 聚类数不能超过训练向量数，小数据集需收紧 nlist。"""
+        return max(1, min(nlist, max(1, n // 4), n))
+
+    @staticmethod
+    def _adapt_pq_m(dim: int, m_pq: int) -> int:
+        """PQ 子空间数必须整除向量维度。"""
+        m_pq = min(m_pq, dim)
+        while dim % m_pq != 0 and m_pq > 1:
+            m_pq -= 1
+        if dim % m_pq != 0:
+            raise ValueError(f'ivf_pq: 无法为 dim={dim} 选择合法的 m_pq')
+        return m_pq
+
+    @staticmethod
+    def _adapt_pq_nbits(n: int, nbits: int) -> int:
+        """
+        PQ 训练对每个子空间做 k-means，k = 2^nbits。
+        训练向量数 n 必须 >= k，否则 FAISS 报 nx >= k 错误。
+        """
+        nbits = min(max(nbits, 4), 8)
+        while nbits > 4 and (1 << nbits) > n:
+            nbits -= 1
+        min_required = 1 << nbits
+        if n < min_required:
+            raise ValueError(
+                f'ivf_pq 至少需要 {min_required} 个向量（PQ 码本 2^{nbits}），'
+                f'当前 n={n}。请增大数据集或改用 ivf_flat / exact。'
+            )
+        return nbits
+
     # ──────────────────────────────────────────────
     # 构建
     # ──────────────────────────────────────────────
@@ -84,17 +116,15 @@ class FaissIndex:
                    else faiss.IndexFlatL2(dim))
 
         elif index_type == 'ivf_flat':
-            nlist = max(1, min(nlist, n // 4))   # nlist 不超过 n/4
+            nlist = self._adapt_ivf_nlist(n, nlist)
             quantizer = self._flat_quantizer(dim)
             idx = faiss.IndexIVFFlat(quantizer, dim, nlist, faiss_metric)
             idx.train(vectors)
 
         elif index_type == 'ivf_pq':
-            nlist = max(1, min(nlist, n // 4))
-            # m_pq 必须整除 dim
-            m_pq = min(m_pq, dim)
-            while dim % m_pq != 0 and m_pq > 1:
-                m_pq -= 1
+            nlist = self._adapt_ivf_nlist(n, nlist)
+            m_pq  = self._adapt_pq_m(dim, m_pq)
+            nbits = self._adapt_pq_nbits(n, nbits)
             quantizer = self._flat_quantizer(dim)
             idx = faiss.IndexIVFPQ(quantizer, dim, nlist, m_pq, nbits, faiss_metric)
             idx.train(vectors)

@@ -16,14 +16,18 @@ import time
 
 import numpy as np
 from flask import Blueprint, request, jsonify, current_app
-from flask_login import login_required, current_user
+from flask_login import current_user
 
 from ..models import db, AnnIndex, Dataset, QueryHistory
+from ..decorators import login_required_api
+from ..permissions import visible_datasets_query, get_accessible_dataset, can_manage_data
 from ..data.loader import _dataset_cache, load_dataset, cache_dataset
 from .manager import (
     build_index_async, build_joint_index_async,
     search_index, search_joint_index,
     evict_index_cache, _joint_mapping_path,
+    remove_index_record, remove_indexes_for_dataset,
+    maintain_index_records, index_is_usable, effective_index_status,
 )
 
 index_bp = Blueprint('index', __name__)
@@ -35,13 +39,24 @@ _VALID_METRICS     = {'l2', 'cosine'}
 _META_COLS = ['cell_type', 'disease', 'AgeGroup', 'donor_id', 'sex']
 
 
+def _can_access_index(ann_index: AnnIndex):
+    return get_accessible_dataset(ann_index.dataset_id)
+
+
+def _filter_visible_indexes(indexes):
+    visible_ids = {d.id for d in visible_datasets_query().all()}
+    return [i for i in indexes if i.dataset_id in visible_ids]
+
+
 # ──────────────────────────────────────────────
 # 构建索引（异步）
 # ──────────────────────────────────────────────
 
 @index_bp.route('/indexes/build', methods=['POST'])
-@login_required
+@login_required_api
 def build_index():
+    if not can_manage_data():
+        return jsonify({'error': '访客无权构建索引，请先登录'}), 403
     body       = request.get_json() or {}
     dataset_id = body.get('dataset_id')
     index_type = body.get('index_type', 'hnsw')
@@ -56,10 +71,16 @@ def build_index():
         return jsonify({'error': f'不支持的 metric，可选: {sorted(_VALID_METRICS)}'}), 400
 
     dataset = Dataset.query.get_or_404(dataset_id)
+    _, err, code = get_accessible_dataset(dataset_id)
+    if err:
+        return err, code
 
     # 将 dim 写入 params，HNSW 加载时需要
     params = dict(params)
     params.setdefault('dim', dataset.n_dims or 30)
+
+    # 同数据集同类型只保留一份索引，避免重复列表与误选旧记录
+    remove_indexes_for_dataset(dataset_id, index_type)
 
     ann_index = AnnIndex(
         dataset_id = dataset_id,
@@ -95,8 +116,10 @@ def build_index():
 # ──────────────────────────────────────────────
 
 @index_bp.route('/indexes/joint_build', methods=['POST'])
-@login_required
+@login_required_api
 def joint_build_index():
+    if not can_manage_data():
+        return jsonify({'error': '访客无权构建索引，请先登录'}), 403
     """
     将多个数据集的向量合并，构建统一 ANN 索引（异步，立即返回 202）。
 
@@ -121,10 +144,11 @@ def joint_build_index():
     if metric not in _VALID_METRICS:
         return jsonify({'error': f'不支持的 metric，可选: {sorted(_VALID_METRICS)}'}), 400
 
-    # 验证所有数据集存在
+    # 验证所有数据集存在且可访问
     for ds_id in dataset_ids:
-        if db.session.get(Dataset, ds_id) is None:
-            return jsonify({'error': f'数据集 {ds_id} 不存在'}), 404
+        _, err, code = get_accessible_dataset(ds_id)
+        if err:
+            return err, code
 
     first_ds = db.session.get(Dataset, dataset_ids[0])
     params['joint']       = True
@@ -165,13 +189,14 @@ def joint_build_index():
 # ──────────────────────────────────────────────
 
 @index_bp.route('/indexes/', methods=['GET'])
-@login_required
 def list_indexes():
+    maintain_index_records(current_app.config['INDEX_FOLDER'])
     dataset_id = request.args.get('dataset_id', type=int)
     q = AnnIndex.query.order_by(AnnIndex.created_at.desc())
     if dataset_id:
         q = q.filter_by(dataset_id=dataset_id)
-    return jsonify([_index_to_dict(i) for i in q.all()])
+    indexes = _filter_visible_indexes(q.all())
+    return jsonify([_index_to_dict(i) for i in indexes])
 
 
 # ──────────────────────────────────────────────
@@ -179,11 +204,12 @@ def list_indexes():
 # ──────────────────────────────────────────────
 
 @index_bp.route('/indexes/<int:index_id>', methods=['GET'])
-@login_required
 def get_index(index_id):
-    # 刷新 session 确保拿到最新状态（后台线程已提交）
     db.session.expire_all()
     ann_index = AnnIndex.query.get_or_404(index_id)
+    _, err, code = _can_access_index(ann_index)
+    if err:
+        return err, code
     return jsonify(_index_to_dict(ann_index))
 
 
@@ -192,22 +218,15 @@ def get_index(index_id):
 # ──────────────────────────────────────────────
 
 @index_bp.route('/indexes/<int:index_id>', methods=['DELETE'])
-@login_required
+@login_required_api
 def delete_index(index_id):
+    if not can_manage_data():
+        return jsonify({'error': '访客无权删除索引，请先登录'}), 403
     ann_index = AnnIndex.query.get_or_404(index_id)
-
-    if ann_index.index_file and os.path.exists(ann_index.index_file):
-        os.remove(ann_index.index_file)
-
-    # 联合索引：同时删除映射文件
-    params_dict = json.loads(ann_index.params or '{}')
-    if params_dict.get('joint'):
-        mapping_file = params_dict.get('mapping_file')
-        if mapping_file and os.path.exists(mapping_file):
-            os.remove(mapping_file)
-
-    evict_index_cache(index_id)
-    db.session.delete(ann_index)
+    _, err, code = _can_access_index(ann_index)
+    if err:
+        return err, code
+    remove_index_record(ann_index)
     db.session.commit()
     return jsonify({'message': '索引已删除'})
 
@@ -217,13 +236,16 @@ def delete_index(index_id):
 # ──────────────────────────────────────────────
 
 @index_bp.route('/indexes/<int:index_id>/search', methods=['POST'])
-@login_required
 def search(index_id):
     db.session.expire_all()
     ann_index = AnnIndex.query.get_or_404(index_id)
+    _, err, code = _can_access_index(ann_index)
+    if err:
+        return err, code
 
-    if ann_index.status != 'ready':
-        return jsonify({'error': f'索引状态为 "{ann_index.status}"，尚不可用'}), 400
+    if not index_is_usable(ann_index):
+        status = effective_index_status(ann_index)
+        return jsonify({'error': f'索引不可用 (状态: {status})，请重新构建'}), 400
 
     params_dict = json.loads(ann_index.params or '{}')
 
@@ -299,7 +321,8 @@ def search(index_id):
         results.append({'rank': rank, 'cell_id': cell_ids[pos],
                         'distance': float(dist), **meta})
 
-    _write_history(current_user.id, dataset_id, query_type,
+    user_id = current_user.id if current_user.is_authenticated else None
+    _write_history(user_id, dataset_id, query_type,
                    str(query_repr), ann_index.index_type, top_k,
                    [r['cell_id'] for r in results], elapsed_ms)
 
@@ -404,7 +427,8 @@ def _joint_search(ann_index: AnnIndex, params_dict: dict):
             **meta,
         })
 
-    _write_history(current_user.id, dataset_ids[0] if dataset_ids else None,
+    user_id = current_user.id if current_user.is_authenticated else None
+    _write_history(user_id, dataset_ids[0] if dataset_ids else None,
                    query_type, str(query_repr), ann_index.index_type, top_k,
                    [r['cell_id'] for r in results], elapsed_ms)
 
@@ -425,7 +449,7 @@ def _joint_search(ann_index: AnnIndex, params_dict: dict):
 # ──────────────────────────────────────────────
 
 @index_bp.route('/history/', methods=['GET'])
-@login_required
+@login_required_api
 def list_history():
     dataset_id = request.args.get('dataset_id', type=int)
     limit      = min(200, max(1, int(request.args.get('limit', 50))))
@@ -433,8 +457,7 @@ def list_history():
     q = QueryHistory.query.order_by(QueryHistory.created_at.desc())
     if dataset_id:
         q = q.filter_by(dataset_id=dataset_id)
-    # 普通用户只看自己的记录
-    if current_user.role != 'admin':
+    if current_user.role not in ('sysadmin', 'labadmin'):
         q = q.filter_by(user_id=current_user.id)
 
     records = q.limit(limit).all()
@@ -470,7 +493,7 @@ def _index_to_dict(i: AnnIndex) -> dict:
         'metric':     i.metric,
         'params':     json.loads(i.params) if i.params else {},
         'index_file': i.index_file,
-        'status':     i.status,
+        'status':     effective_index_status(i),
         'build_time': i.build_time,
         'created_at': i.created_at.isoformat(),
     }

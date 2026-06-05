@@ -5,7 +5,8 @@ import pandas as pd
 import anndata as ad
 from app import create_app, db
 from app.models import User, Dataset, AnnIndex
-from app.data.loader import cache_dataset
+from app.data.loader import load_dataset, cache_dataset
+from app.index.manager import build_index_sync
 
 def create_sample_h5ad(path):
     n_cells = 100
@@ -64,17 +65,30 @@ with app.app_context():
     db.session.commit()
     print(f"创建数据集: {ds1.name}")
 
-    # 2. 为该数据集创建一个 HNSW 索引 (标记为 ready)
+    # 2. 为该数据集构建 HNSW 索引
     idx1 = AnnIndex(
         dataset_id=ds1.id,
         index_type='hnsw',
         metric='l2',
-        params=json.dumps({'dim': n_d, 'M': 16, 'efConstruction': 200}),
-        status='ready'
+        params=json.dumps({'dim': n_d, 'M': 16, 'ef_construction': 200}),
+        status='building',
     )
     db.session.add(idx1)
     db.session.commit()
-    print(f"创建索引: {idx1.index_type} for {ds1.name}")
+    idx1_id = idx1.id
+    data = load_dataset(path1)
+    cache_dataset(ds1.id, data)
+    build_index_sync(
+        app,
+        dataset_id=ds1.id,
+        ann_index_id=idx1_id,
+        index_type='hnsw',
+        metric='l2',
+        params={'dim': n_d, 'M': 16, 'ef_construction': 200},
+        index_folder=app.config['INDEX_FOLDER'],
+    )
+    db.session.expire_all()
+    print(f"创建索引: hnsw for {ds1.name}")
 
     # 3. 生成示例数据集 2 (公开数据)
     path2 = os.path.join(upload_dir, 'public_atlas.h5ad')
@@ -94,8 +108,6 @@ with app.app_context():
     db.session.commit()
     print(f"创建公开数据集: {ds2.name}")
 
-    # 强制缓存数据集以加快首次访问
-    data1 = {'n_cells': n_c, 'n_dims': n_d, 'cells': [f'Cell_{i:03d}' for i in range(100)], 'pca': np.random.rand(100, n_d).astype(np.float32)}
-    cache_dataset(ds1.id, data1)
-    
+    cache_dataset(ds2.id, load_dataset(path2))
+
     print("数据初始化成功！")
