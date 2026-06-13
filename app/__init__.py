@@ -36,6 +36,7 @@ def create_app(test_config: dict = None):
     from .search        import search_bp
     from .admin         import admin_bp
     from .evaluate      import evaluate_bp
+    from .chat          import chat_bp
 
     app.register_blueprint(auth_bp,    url_prefix='/auth')
     app.register_blueprint(data_bp,    url_prefix='/api/datasets')
@@ -43,6 +44,7 @@ def create_app(test_config: dict = None):
     app.register_blueprint(search_bp,  url_prefix='/api/search')
     app.register_blueprint(admin_bp,   url_prefix='/admin')
     app.register_blueprint(evaluate_bp, url_prefix='/api/evaluate')
+    app.register_blueprint(chat_bp,    url_prefix='/api/chat')
 
     # 健康检查路由
     @app.route('/ping')

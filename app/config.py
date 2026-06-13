@@ -9,3 +9,4 @@ class Config:
     UPLOAD_FOLDER = os.path.join(BASE_DIR, 'data', 'uploads')
     INDEX_FOLDER  = os.path.join(BASE_DIR, 'data', 'indexes')
     MAX_CONTENT_LENGTH = 2 * 1024 * 1024 * 1024  # 最大上传 2 GB
+    DEEPSEEK_API_KEY   = os.environ.get('DEEPSEEK_API_KEY', '')

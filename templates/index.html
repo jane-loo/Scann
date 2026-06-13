@@ -112,6 +112,40 @@
             const [buildMetric, setBuildMetric] = useState('l2');
             const [topK, setTopK] = useState(10);
 
+            // AI Chat State
+            const [chatDatasetId, setChatDatasetId] = useState('');
+            const [chatHistory, setChatHistory] = useState([]);
+            const [chatInput, setChatInput] = useState('');
+            const [chatLoading, setChatLoading] = useState(false);
+            const [chatResult, setChatResult] = useState(null);
+            const chatEndRef = React.useRef(null);
+            useEffect(() => {
+                if (chatEndRef.current) chatEndRef.current.scrollIntoView({ behavior: 'smooth' });
+            }, [chatHistory]);
+
+            const [chatVizTab, setChatVizTab] = useState('scatter');
+
+            // 切换 tab 或结果更新时渲染图表
+            useEffect(() => {
+                if (!chatResult || view !== 'ai_chat') return;
+                const results = chatResult.results || [];
+                const dsId = Number(chatDatasetId);
+
+                // 延迟一帧，确保 canvas DOM 已挂载
+                const tid = setTimeout(() => {
+                    if (chatVizTab === 'scatter' && dsId) {
+                        SearchViz.destroyAll('ai-chat-scatter');
+                        SearchViz.fetchEmbedData(dsId).then(embed => {
+                            SearchViz.renderScatter('ai-chat-scatter', embed, null, results, embed.source, null, null);
+                        }).catch(err => console.warn('embed fetch:', err));
+                    } else if (chatVizTab === 'meta') {
+                        SearchViz.destroyAll('ai-chat-meta');
+                        SearchViz.renderMetaProfile('ai-chat-meta', results);
+                    }
+                }, 50);
+                return () => clearTimeout(tid);
+            }, [chatResult, chatVizTab, view]);
+
             // Records (history + eval reports)
             const [recordsTab, setRecordsTab] = useState('history');
             const [queryHistory, setQueryHistory] = useState([]);
@@ -906,6 +940,10 @@
                                     <span>用户管理</span>
                                 </button>
                             )}
+                            <button onClick={()=>{ setChatDatasetId(String(selectedDsId||'')); setView('ai_chat'); }} className={`w-full flex items-center gap-3 p-4 rounded-2xl transition-all ${view==='ai_chat'?'bg-violet-50 text-violet-600':'text-slate-400 hover:bg-slate-50'}`}>
+                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+                                <span>AI 细胞分析</span>
+                            </button>
                         </nav>
 
                         <div className="mt-auto space-y-4">
@@ -1960,6 +1998,273 @@
                                 </div>
                             </div>
                         )}
+
+                        {/* ── AI 细胞分析 ── */}
+                        {view === 'ai_chat' && (() => {
+                            const sendChat = async () => {
+                                if (!chatInput.trim() || !chatDatasetId || chatLoading) return;
+                                const userMsg = chatInput.trim();
+                                setChatInput('');
+                                setChatLoading(true);
+                                const historyForApi = chatHistory.map(m => ({ role: m.role, content: m.content }));
+                                setChatHistory(h => [...h, { role: 'user', content: userMsg }]);
+                                try {
+                                    const res = await axios.post('/api/chat/query', {
+                                        message: userMsg,
+                                        dataset_id: Number(chatDatasetId),
+                                        history: historyForApi,
+                                    });
+                                    setChatResult(res.data);
+                                    setChatHistory(h => [...h, { role: 'assistant', content: res.data.analysis, data: res.data }]);
+                                } catch(e) {
+                                    const msg = e?.response?.data?.error || e.message || '请求失败';
+                                    setChatHistory(h => [...h, { role: 'assistant', content: `⚠️ ${msg}`, isError: true }]);
+                                } finally {
+                                    setChatLoading(false);
+                                }
+                            };
+
+                            const StatBadges = ({ stats }) => {
+                                if (!stats) return null;
+                                const topEntries = Object.entries(stats).slice(0, 3);
+                                return (
+                                    <div className="mt-3 space-y-1.5">
+                                        {topEntries.map(([field, counts]) => {
+                                            const top3 = Object.entries(counts).sort((a,b)=>b[1]-a[1]).slice(0,3);
+                                            return (
+                                                <div key={field} className="text-[10px]">
+                                                    <span className="text-slate-400 font-bold uppercase mr-1">{field}:</span>
+                                                    {top3.map(([v, c]) => (
+                                                        <span key={v} className="inline-block mr-1 px-1.5 py-0.5 bg-violet-50 text-violet-600 rounded font-medium">{v} <span className="text-violet-300">×{c}</span></span>
+                                                    ))}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                );
+                            };
+
+                            return (
+                                <div className="flex gap-6 h-[calc(100vh-8rem)]">
+                                    {/* Left: chat */}
+                                    <div className="flex flex-col w-[420px] flex-shrink-0 card overflow-hidden">
+                                        <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+                                            <div>
+                                                <p className="text-[10px] font-black text-violet-500 uppercase tracking-widest">AI Cell Analysis</p>
+                                                <h2 className="text-lg font-black text-slate-900">AI 细胞分析助手</h2>
+                                            </div>
+                                            <select
+                                                value={chatDatasetId}
+                                                onChange={e => setChatDatasetId(e.target.value)}
+                                                className="text-xs border border-slate-200 rounded-xl px-3 py-2 font-bold text-slate-600"
+                                            >
+                                                <option value="">选择数据集…</option>
+                                                {datasets.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+                                            </select>
+                                        </div>
+
+                                        {/* Message list */}
+                                        <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                                            {chatHistory.length === 0 && (
+                                                <div className="h-full flex flex-col items-center justify-center text-center text-slate-400 gap-3">
+                                                    <div className="w-14 h-14 rounded-2xl bg-violet-50 flex items-center justify-center text-2xl">🧬</div>
+                                                    <p className="text-sm font-bold text-slate-500">用自然语言描述你想找的细胞</p>
+                                                    <div className="space-y-2 text-xs text-slate-400">
+                                                        {['找肝脏中的巨噬细胞，返回20个', '查询所有 CD4+ T 细胞', '找与炎症相关的单核细胞'].map(ex => (
+                                                            <button key={ex} onClick={() => setChatInput(ex)}
+                                                                className="block w-full text-left px-3 py-2 rounded-xl bg-slate-50 hover:bg-violet-50 hover:text-violet-600 transition-colors">
+                                                                "{ex}"
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
+                                            {chatHistory.map((msg, i) => (
+                                                <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                                    <div className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-relaxed
+                                                        ${msg.role === 'user'
+                                                            ? 'bg-blue-600 text-white rounded-br-sm'
+                                                            : msg.isError
+                                                                ? 'bg-red-50 text-red-700 border border-red-100 rounded-bl-sm'
+                                                                : 'bg-slate-50 text-slate-800 border border-slate-100 rounded-bl-sm'
+                                                        }`}>
+                                                        {msg.role === 'assistant' && msg.data && (
+                                                            <div className="mb-2 pb-2 border-b border-slate-200">
+                                                                <div className="flex items-center gap-2 flex-wrap">
+                                                                    <span className="text-[10px] font-black uppercase text-violet-500">检索结果</span>
+                                                                    <span className="text-[10px] bg-violet-100 text-violet-600 px-2 py-0.5 rounded-full font-bold">
+                                                                        命中 {msg.data.total_matched} 个 · 展示 {msg.data.found} 个
+                                                                    </span>
+                                                                </div>
+                                                                {msg.data.filters_applied && Object.keys(msg.data.filters_applied).length > 0 && (
+                                                                    <div className="mt-1 flex flex-wrap gap-1">
+                                                                        {Object.entries(msg.data.filters_applied).map(([k,v]) => (
+                                                                            <span key={k} className="text-[9px] bg-blue-50 text-blue-500 border border-blue-100 px-1.5 py-0.5 rounded-full">
+                                                                                {k}: {Array.isArray(v) ? v.join('/') : v}
+                                                                            </span>
+                                                                        ))}
+                                                                    </div>
+                                                                )}
+                                                                <StatBadges stats={msg.data.cell_stats} />
+                                                            </div>
+                                                        )}
+                                                        <p className="whitespace-pre-wrap">{msg.content}</p>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                            {chatLoading && (
+                                                <div className="flex justify-start">
+                                                    <div className="bg-slate-50 border border-slate-100 rounded-2xl rounded-bl-sm px-4 py-3 flex items-center gap-2">
+                                                        <div className="spinner" style={{width:16,height:16,borderWidth:2}}></div>
+                                                        <span className="text-xs text-slate-400">AI 分析中…</span>
+                                                    </div>
+                                                </div>
+                                            )}
+                                            <div ref={chatEndRef}></div>
+                                        </div>
+
+                                        {/* Input */}
+                                        <div className="p-4 border-t border-slate-100">
+                                            <div className="flex gap-2">
+                                                <input
+                                                    value={chatInput}
+                                                    onChange={e => setChatInput(e.target.value)}
+                                                    onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); } }}
+                                                    placeholder={chatDatasetId ? '描述你想找的细胞…' : '请先选择数据集'}
+                                                    disabled={!chatDatasetId || chatLoading}
+                                                    className="flex-1 border border-slate-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-violet-300 disabled:bg-slate-50"
+                                                />
+                                                <button
+                                                    onClick={sendChat}
+                                                    disabled={!chatInput.trim() || !chatDatasetId || chatLoading}
+                                                    className="px-4 py-2.5 bg-violet-600 hover:bg-violet-700 disabled:bg-slate-200 text-white rounded-xl font-bold text-sm transition-colors"
+                                                >发送</button>
+                                            </div>
+                                            <p className="text-[10px] text-slate-400 mt-2 text-center">Enter 发送 · AI 由 DeepSeek 驱动 · 结果仅供参考</p>
+                                        </div>
+                                    </div>
+
+                                    {/* Right: visualization panel */}
+                                    <div className="flex-1 card overflow-hidden flex flex-col min-w-0">
+                                        {!chatResult ? (
+                                            <div className="flex-1 flex items-center justify-center text-slate-300 flex-col gap-3">
+                                                <svg className="w-16 h-16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                                                <p className="font-bold text-slate-400">发送查询后，检索结果将在这里可视化</p>
+                                                <p className="text-xs text-slate-300">支持 2D 散点图、元数据分布图、细胞列表</p>
+                                            </div>
+                                        ) : (
+                                            <>
+                                                {/* Header */}
+                                                <div className="px-5 py-3 border-b border-slate-100 flex items-center justify-between flex-shrink-0">
+                                                    <div>
+                                                        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">检索结果</p>
+                                                        <h3 className="font-black text-slate-800 text-sm truncate max-w-xs">{chatResult.intent?.search_description || '查询结果'}</h3>
+                                                    </div>
+                                                    <div className="flex items-center gap-2 flex-shrink-0">
+                                                        <span className="text-[10px] bg-green-100 text-green-700 px-2.5 py-1 rounded-full font-bold whitespace-nowrap">
+                                                            共 {chatResult.total_matched} 匹配 · 展示 {chatResult.found}
+                                                        </span>
+                                                        {chatVizTab === 'scatter' && (
+                                                            <button onClick={() => SearchViz.resetZoom('ai-chat-scatter')}
+                                                                className="text-[10px] text-slate-400 hover:text-slate-700 border border-slate-200 rounded-lg px-2 py-1 transition-colors">
+                                                                ↺ 重置
+                                                            </button>
+                                                        )}
+                                                    </div>
+                                                </div>
+
+                                                {/* Viz Tab bar */}
+                                                <div className="px-4 pt-2 border-b border-slate-100 flex gap-1 flex-shrink-0">
+                                                    {[
+                                                        { id: 'scatter', label: '散点图', icon: '◎' },
+                                                        { id: 'meta',    label: '元数据分布', icon: '▦' },
+                                                        { id: 'list',    label: '细胞列表', icon: '≡' },
+                                                    ].map(t => (
+                                                        <button key={t.id} onClick={() => setChatVizTab(t.id)}
+                                                            className={`flex items-center gap-1.5 px-4 py-2 rounded-t-lg text-[10px] font-black uppercase transition-all border-b-2
+                                                                ${chatVizTab === t.id
+                                                                    ? 'border-violet-500 text-violet-600 bg-violet-50'
+                                                                    : 'border-transparent text-slate-400 hover:text-slate-600'}`}>
+                                                            <span>{t.icon}</span>{t.label}
+                                                        </button>
+                                                    ))}
+                                                </div>
+
+                                                {/* Chart / List area */}
+                                                <div className="flex-1 overflow-hidden">
+
+                                                    {/* Scatter tab */}
+                                                    {chatVizTab === 'scatter' && (
+                                                        <div className="h-full p-4 flex flex-col">
+                                                            <canvas id="ai-chat-scatter" className="flex-1 min-h-0"></canvas>
+                                                            <p className="text-[10px] text-slate-400 text-center mt-2">
+                                                                滚轮缩放 · 拖拽平移 · 彩色点为过滤命中细胞
+                                                            </p>
+                                                        </div>
+                                                    )}
+
+                                                    {/* Meta distribution tab */}
+                                                    {chatVizTab === 'meta' && (
+                                                        <div className="h-full p-4 flex flex-col">
+                                                            <canvas id="ai-chat-meta" className="flex-1 min-h-0"></canvas>
+                                                        </div>
+                                                    )}
+
+                                                    {/* Cell list tab */}
+                                                    {chatVizTab === 'list' && (
+                                                        <div className="h-full overflow-y-auto">
+                                                            <table className="w-full text-xs">
+                                                                <thead className="sticky top-0 bg-slate-50 text-[10px] font-black uppercase text-slate-400 z-10">
+                                                                    <tr>
+                                                                        <th className="text-right p-3 w-8">#</th>
+                                                                        <th className="text-left p-3">Cell ID</th>
+                                                                        <th className="text-left p-3">细胞类型</th>
+                                                                        <th className="text-left p-3">组织</th>
+                                                                        <th className="text-left p-3">疾病</th>
+                                                                        <th className="text-left p-3">性别</th>
+                                                                    </tr>
+                                                                </thead>
+                                                                <tbody>
+                                                                    {(chatResult.results || []).map((cell, i) => (
+                                                                        <tr key={cell.cell_id} className={`border-t border-slate-50 hover:bg-violet-50 transition-colors ${i % 2 === 0 ? '' : 'bg-slate-50/50'}`}>
+                                                                            <td className="p-3 text-right font-black text-slate-300">{cell.rank}</td>
+                                                                            <td className="p-3 font-mono text-slate-600 max-w-[120px] truncate">{cell.cell_id}</td>
+                                                                            <td className="p-3">
+                                                                                <span className="px-2 py-0.5 bg-violet-100 text-violet-700 rounded-full font-bold text-[10px]">
+                                                                                    {cell.cell_type || '—'}
+                                                                                </span>
+                                                                            </td>
+                                                                            <td className="p-3 text-slate-500">{cell.metadata?.tissue || '—'}</td>
+                                                                            <td className="p-3 text-slate-500">{cell.metadata?.disease || '—'}</td>
+                                                                            <td className="p-3 text-slate-500">{cell.metadata?.sex || '—'}</td>
+                                                                        </tr>
+                                                                    ))}
+                                                                </tbody>
+                                                            </table>
+                                                            {(chatResult.results || []).length === 0 && (
+                                                                <div className="p-8 text-center text-slate-400">
+                                                                    <p className="font-bold">未找到匹配细胞</p>
+                                                                    <p className="text-xs mt-1">尝试放宽查询条件</p>
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    )}
+                                                </div>
+
+                                                {/* Bottom knowledge strip */}
+                                                {chatResult.knowledge && (
+                                                    <div className="flex-shrink-0 px-5 py-3 border-t border-slate-100 bg-amber-50">
+                                                        <p className="text-[10px] font-black text-amber-600 uppercase mb-1">知识库参考</p>
+                                                        <p className="text-[11px] text-amber-800 leading-relaxed line-clamp-2">{chatResult.knowledge.replace(/\n/g, ' · ')}</p>
+                                                    </div>
+                                                )}
+                                            </>
+                                        )}
+                                    </div>
+                                </div>
+                            );
+                        })()}
+
                     </main>
 
                     {compareOpen && (
