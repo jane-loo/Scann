@@ -190,6 +190,37 @@ def load_dataset(file_path: str, persist_pca: bool = True) -> dict:
             vectorization = dict(vectorization)
             vectorization['viz_fallback'] = 'PCA Dim1×Dim2（无 X_umap 时的散点图回退）'
 
+    # 生成数据集概览统计 (Dataset Overview Statistics)
+    stats = {
+        'cell_type_dist': {},
+        'gene_count_bins': [],
+        'total_counts_bins': []
+    }
+    
+    # 1. 细胞类型分布
+    if 'cell_type' in obs.columns:
+        counts = obs['cell_type'].value_counts()
+        stats['cell_type_dist'] = counts.to_dict()
+    
+    # 2. 基因数与测序深度分布 (QC Metrics)
+    # 如果 adata 中没有这些信息，尝试计算并缓存到 stats 中
+    n_genes_col = 'n_genes_by_counts' if 'n_genes_by_counts' in obs.columns else None
+    if not n_genes_col:
+        # 简单粗暴估算（非 0 基因数）
+        if sp.issparse(adata.X):
+            n_genes_per_cell = np.array((adata.X > 0).sum(axis=1)).flatten()
+        else:
+            n_genes_per_cell = np.array((adata.X > 0).sum(axis=1))
+        obs['n_genes_by_counts'] = n_genes_per_cell
+        n_genes_col = 'n_genes_by_counts'
+
+    # 计算直方图数据 (10个 bins)
+    hist, bin_edges = np.histogram(obs[n_genes_col].dropna(), bins=10)
+    stats['gene_count_bins'] = {
+        'counts': hist.tolist(),
+        'edges': bin_edges.tolist()
+    }
+
     return {
         'vectors':       vectors,
         'cell_ids':      cell_ids,
@@ -203,6 +234,7 @@ def load_dataset(file_path: str, persist_pca: bool = True) -> dict:
         'tsne_coords':   tsne_coords,
         'vectorization': vectorization,
         'pca_computed':  pca_computed,
+        'stats':         stats
     }
 
 

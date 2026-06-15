@@ -74,6 +74,7 @@ def upload_dataset():
         cell_types  = json.dumps(data['cell_types'],  ensure_ascii=False),
         obs_columns = json.dumps(data['obs_columns'], ensure_ascii=False),
         vector_meta = json.dumps(data['vectorization'], ensure_ascii=False),
+        stats_json  = json.dumps(data.get('stats', {}), ensure_ascii=False),
         upload_by   = current_user.id,
     )
     db.session.add(dataset)
@@ -438,6 +439,7 @@ def _dataset_to_dict(d: Dataset) -> dict:
         'obs_columns': json.loads(d.obs_columns) if d.obs_columns else [],
         'vector_source': vectorization.get('source', 'file'),
         'vectorization': vectorization,
+        'stats':       json.loads(d.stats_json) if getattr(d, 'stats_json', None) else {},
         'created_at':  d.created_at.isoformat(),
     }
 

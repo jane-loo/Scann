@@ -35,6 +35,7 @@ class Dataset(db.Model):
     cell_types  = db.Column(db.Text)          # JSON 列表
     obs_columns = db.Column(db.Text)          # JSON 列表：可用元数据列名
     vector_meta = db.Column(db.Text)          # JSON：PCA 向量化来源与流水线说明
+    stats_json  = db.Column(db.Text)          # JSON：数据集统计信息（分布、QC等）
     upload_by   = db.Column(db.Integer, db.ForeignKey('user.id'))
     created_at  = db.Column(db.DateTime, default=datetime.utcnow)
 

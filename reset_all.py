@@ -82,17 +82,16 @@ with app.app_context():
         path = os.path.join(upload_dir, fname)
         c, g, d = create_sample_h5ad(path, name)
 
-        cell_types = ['TypeA', 'TypeB']
-        obs_columns = ['cell_type']
-
+        data = load_dataset(path)
         ds = Dataset(
             name=name,
             file_path=path,
             n_cells=c,
             n_genes=g,
             n_dims=d,
-            cell_types=json.dumps(cell_types),
-            obs_columns=json.dumps(obs_columns),
+            cell_types=json.dumps(data['cell_types']),
+            obs_columns=json.dumps(data['obs_columns']),
+            stats_json=json.dumps(data['stats']),
             upload_by=None
         )
         db.session.add(ds)
