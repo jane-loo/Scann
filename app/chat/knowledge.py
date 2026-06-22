@@ -61,6 +61,51 @@ _KB = {
         'subtypes': '肠上皮、肺上皮、乳腺上皮等（组织特异性 KRT 亚型）',
         'function': '屏障功能，分泌功能，组织特异性吸收/分泌',
     },
+    'Plasma cell': {
+        'markers': ['SDC1', 'PRDM1', 'MZB1', 'IGHG1', 'CD38'],
+        'subtypes': 'IgG浆细胞、IgA浆细胞、长寿浆细胞',
+        'function': '分泌大量抗体的终末分化B细胞',
+    },
+    'Erythrocyte': {
+        'markers': ['HBA1', 'HBA2', 'HBB', 'GYPA', 'ALAS2'],
+        'subtypes': '成熟红细胞（无核）、网织红细胞',
+        'function': '携带氧气，维持血液渗透压',
+    },
+    'Platelet': {
+        'markers': ['ITGA2B', 'ITGB3', 'GP1BA', 'PPBP', 'PF4'],
+        'subtypes': '血小板（巨核细胞衍生）',
+        'function': '止血与凝血功能，参与初步炎症反应',
+    },
+    'Smooth Muscle cell': {
+        'markers': ['ACTA2', 'TAGLN', 'MYH11', 'CNN1', 'MYL9'],
+        'subtypes': '血管平滑肌细胞（vSMC）、各种脏器平滑肌',
+        'function': '收缩功能，调节血管阻力和器官蠕动',
+    },
+    'Stellate cell': {
+        'markers': ['RBP4', 'GFAP', 'ACTA2', 'LRAT', 'PDGFRB'],
+        'subtypes': '肝星状细胞、胰腺星状细胞',
+        'function': '存储维生素A；活化后参与组织纤维化',
+    },
+    'Cardiomyocyte': {
+        'markers': ['TNNT2', 'TNNI3', 'MYH6', 'MYH7', 'TTN'],
+        'subtypes': '心房肌、心室肌、传导束系统',
+        'function': '心肌收缩，泵血动力来源',
+    },
+    'Neuron': {
+        'markers': ['RBFOX3', 'MAP2', 'SYP', 'DLG4', 'TUBB3'],
+        'subtypes': '兴奋性神经元（SLC17A7）、抑制性神经元（GAD1/2）',
+        'function': '电信号传导，处理与整合信息',
+    },
+    'Microglia': {
+        'markers': ['AIF1', 'TMEM119', 'P2RY12', 'CX3CR1', 'C1QA'],
+        'subtypes': '稳态小胶质细胞、DAM（疾病相关）',
+        'function': '中枢神经系统中的专职巨噬细胞',
+    },
+    'Adipocyte': {
+        'markers': ['ADIPOQ', 'LEP', 'PPARG', 'FABP4', 'PLIN1'],
+        'subtypes': '白色脂肪、棕色脂肪、米色脂肪',
+        'function': '能量储存、分泌瘦素及脂肪因子',
+    },
 }
 
 
