@@ -79,6 +79,7 @@ const ScannAPI = {
     },
     getEvaluationReport: (datasetId) => api.get(`/api/evaluate/${datasetId}/report`),
     runParamSweep: (datasetId, data) => api.post(`/api/evaluate/${datasetId}/param_sweep`, data),
+    playgroundProbe: (datasetId, data) => api.post(`/api/evaluate/${datasetId}/playground`, data),
 
     // Chat
     getChatJointIndexes: (datasetId) =>

@@ -77,3 +77,33 @@ def default_sweep_values(index_type: str) -> list[int]:
     if index_type == 'hnsw':
         return [32, 50, 100, 200, 400]
     return [1, 4, 8, 16, 32, 64]
+
+
+def runtime_playground_config(index_type: str, index_params: dict | None = None) -> dict:
+    """ANN 控制台：运行时参数名、范围与三档预设。"""
+    params = index_params or {}
+    if index_type == 'hnsw':
+        return {
+            'param_name': 'ef_search',
+            'min': 16,
+            'max': 512,
+            'default': int(params.get('ef_search') or 100),
+            'presets': {
+                'fast': {'label': '省内存 / 极速', 'value': 32, 'hint': '低延迟，Recall 可能下降'},
+                'balanced': {'label': '平衡', 'value': 100, 'hint': '速度与精度折中'},
+                'precise': {'label': '高精度', 'value': 400, 'hint': '更高 Recall，查询更慢'},
+            },
+        }
+    nlist = max(4, int(params.get('nlist') or 64))
+    return {
+        'param_name': 'nprobe',
+        'min': 1,
+        'max': min(nlist, 128),
+        'default': int(params.get('nprobe') or max(1, nlist // 10)),
+        'presets': {
+            'fast': {'label': '省内存 / 极速', 'value': 1, 'hint': '探测最少聚类中心'},
+            'balanced': {'label': '平衡', 'value': max(1, nlist // 10), 'hint': '推荐日常使用'},
+            'precise': {'label': '高精度', 'value': max(1, min(nlist, nlist // 2)), 'hint': '接近暴力扫描'},
+        },
+    }
+

@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
@@ -33,6 +33,7 @@
     <script src="/static/js/search-viz.js"></script>
     <script src="/static/js/cell-compare.js"></script>
     <script src="/static/js/benchmark-viz.js"></script>
+    <script src="/static/js/ann-playground.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
     <script src="/static/js/pdf-export.js"></script>
     <script src="/static/js/export-utils.js"></script>
@@ -167,6 +168,9 @@
 
             const [paramSweepResults, setParamSweepResults] = useState(null);
             const [paramSweepLoading, setParamSweepLoading] = useState(false);
+
+            const [searchResultTab, setSearchResultTab] = useState('results');
+            const [showSearchHelp, setShowSearchHelp] = useState(false);
 
             useEffect(() => {
                 if (!chatDatasetId || !chatUseJoint) {
@@ -375,6 +379,15 @@
             const hasExactBaseline = useMemo(() =>
                 readyIndices.some(i => i.index_type === 'exact'),
             [readyIndices]);
+
+            const selectedSearchAnnIndex = useMemo(() =>
+                readyIndices.find(i => String(i.id) === String(selectedIdxId)),
+            [readyIndices, selectedIdxId]);
+
+            const annLabAvailable = useMemo(() =>
+                !jointSearchMode && !indexCompareMode && hasExactBaseline && selectedSearchAnnIndex
+                && ['hnsw', 'ivf_flat', 'ivf_pq'].includes(selectedSearchAnnIndex.index_type),
+            [jointSearchMode, indexCompareMode, hasExactBaseline, selectedSearchAnnIndex]);
 
             const selectedEvalIndex = useMemo(() =>
                 benchmarkIndices.find(i => String(i.id) === String(evalIdxId)),
@@ -605,6 +618,37 @@
                     筛选数据集: recordsDsFilter ? datasetNameById(recordsDsFilter) : '全部',
                 });
             };
+
+            useEffect(() => {
+                if (view !== 'search' || !annLabAvailable) {
+                    if (typeof AnnPlayground !== 'undefined') AnnPlayground.unmount();
+                    return;
+                }
+                const timer = setTimeout(() => {
+                    const controls = document.getElementById('ann-lab-controls');
+                    const results = document.getElementById('ann-lab-results');
+                    if (controls && typeof AnnPlayground !== 'undefined') {
+                        AnnPlayground.mountEmbedded(controls, results, {
+                            datasetId: selectedDsId,
+                            indexId: selectedIdxId,
+                            topK: Number(topK),
+                            cellId: searchType === 'id' ? queryInput : '',
+                        });
+                    }
+                }, 100);
+                return () => {
+                    clearTimeout(timer);
+                    if (typeof AnnPlayground !== 'undefined') AnnPlayground.unmount();
+                };
+            }, [view, annLabAvailable, selectedDsId, selectedIdxId]);
+
+            useEffect(() => {
+                if (view !== 'search' || !annLabAvailable || typeof AnnPlayground === 'undefined') return;
+                const cid = searchResults?.query_cell_id && searchResults.query_cell_id !== 'Vector'
+                    ? searchResults.query_cell_id
+                    : (searchType === 'id' ? queryInput : '');
+                AnnPlayground.updateContext({ topK: Number(topK), cellId: cid });
+            }, [topK, queryInput, searchResults, searchType, view, annLabAvailable]);
 
             const runJointSearch = async (query_type, query_input) => {
                 if (!selectedJointIdxId) throw { error: '请先在「数据与索引」构建联合索引，或选择 ready 的联合索引' };
@@ -1204,9 +1248,14 @@
                             <div className="max-w-6xl mx-auto space-y-8">
                                 <header className="flex justify-between items-end">
                                     <div>
-                                        <h2 className="text-3xl font-black tracking-tight">智能细胞检索</h2>
+                                        <div className="flex items-center gap-3 mb-1">
+                                            <h2 className="text-3xl font-black tracking-tight">智能细胞检索</h2>
+                                            <button type="button" onClick={() => setShowSearchHelp(true)}
+                                                className="w-9 h-9 rounded-full bg-white border border-slate-200 text-sm font-black text-slate-500 hover:bg-blue-50 hover:text-blue-600 hover:border-blue-200 shadow-sm transition-all"
+                                                title="使用帮助">?</button>
+                                        </div>
                                         <p className="text-slate-400 font-medium">
-                                            {isGuest ? '访客模式：可使用公共演示数据集进行检索' : '支持海量单细胞数据的毫秒级相似度比对'}
+                                            {isGuest ? '访客模式 · 检索与 ANN 参数实验一体化' : '相似性检索 · 元数据过滤 · 实时 ANN 参数对比'}
                                         </p>
                                     </div>
                                     <div className="flex bg-white p-1 rounded-xl border shadow-sm">
@@ -1366,6 +1415,29 @@
                                             </div>
                                         </section>
 
+                                        {annLabAvailable && (
+                                            <section className="card p-6 space-y-3 border border-blue-100/80">
+                                                <div className="flex justify-between items-center gap-2">
+                                                    <h3 className="text-[10px] font-black uppercase text-blue-600 tracking-widest">3. ANN 参数实验</h3>
+                                                    <button type="button" onClick={() => setSearchResultTab('ann-lab')}
+                                                        className="text-[9px] font-black text-blue-600 uppercase hover:underline">查看对比 →</button>
+                                                </div>
+                                                <p className="text-[9px] text-slate-500 leading-relaxed">
+                                                    使用当前数据集与 ANN 索引（{selectedSearchAnnIndex?.index_type?.toUpperCase()}）。
+                                                    输入 Cell ID 后执行检索，或直接拖动下方滑块；右侧切到「ANN 参数对比」看 Exact 基线差异。
+                                                </p>
+                                                <div id="ann-lab-controls"></div>
+                                            </section>
+                                        )}
+
+                                        {!annLabAvailable && !jointSearchMode && !indexCompareMode && (
+                                            <p className="text-[9px] text-slate-400 px-2 leading-relaxed">
+                                                {!hasExactBaseline
+                                                    ? '构建 Exact + ANN 索引后，此处将出现 ANN 参数实验面板。'
+                                                    : '请选择 HNSW / IVF 类型索引以启用 ANN 参数实验。'}
+                                            </p>
+                                        )}
+
                                         <button onClick={runSearch} disabled={searchLoading || (jointSearchMode ? !selectedJointIdxId : (indexCompareMode ? readyIndices.length < 2 : !selectedIdxId))} className="w-full py-5 btn-primary rounded-3xl font-black text-lg shadow-xl shadow-blue-500/20 flex items-center justify-center gap-3 disabled:opacity-30">
                                             {searchLoading ? <div className="spinner !border-white"></div> : (jointSearchMode ? '执行联合检索' : (indexCompareMode ? '执行多索引对比' : '执行检索引擎'))}
                                         </button>
@@ -1386,6 +1458,19 @@
                                         </div>
 
                                         <div className="card flex-1 min-h-[500px] p-8">
+                                            {!compareResults && annLabAvailable && (
+                                                <div className="flex bg-slate-100 p-1 rounded-xl mb-6 w-fit">
+                                                    <button type="button" onClick={() => setSearchResultTab('results')}
+                                                        className={`px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all ${searchResultTab === 'results' ? 'bg-white shadow text-blue-600' : 'text-slate-400'}`}>
+                                                        检索结果
+                                                    </button>
+                                                    <button type="button" onClick={() => setSearchResultTab('ann-lab')}
+                                                        className={`px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all ${searchResultTab === 'ann-lab' ? 'bg-white shadow text-blue-600' : 'text-slate-400'}`}>
+                                                        ANN 参数对比
+                                                    </button>
+                                                </div>
+                                            )}
+
                                             {compareResults ? (
                                                 <div className="space-y-6">
                                                     <div className="flex flex-wrap justify-between items-center gap-4 border-b pb-6">
@@ -1436,12 +1521,21 @@
                                                         重叠率 = 该索引 Top-{compareResults.top_k || topK} 细胞 ID 与 {compareResults.baseline_type} 基线的交集占比。无 exact 索引时以第一个参与对比的索引为基线。
                                                     </p>
                                                 </div>
-                                            ) : !searchResults ? (
-                                                <div className="h-full flex flex-col items-center justify-center text-slate-200">
+                                            ) : (
+                                                <>
+                                                    {annLabAvailable && (
+                                                        <div id="ann-lab-results" className={`min-h-[420px] ${searchResultTab === 'ann-lab' ? '' : 'hidden'}`}></div>
+                                                    )}
+                                                    {(!annLabAvailable || searchResultTab === 'results') && (
+                                                        !searchResults ? (
+                                                <div className="h-full flex flex-col items-center justify-center text-slate-200 min-h-[320px]">
                                                     <svg className="w-24 h-24 mb-4 opacity-20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.628.283a2 2 0 01-1.131.21l-3.983-.588a2 2 0 00-1.48.223l-1.46.767a2 2 0 01-2.06.06L2 10V4a2 2 0 012-2h8a2 2 0 012 2v3h1a2 2 0 012 2v-3a2 2 0 012-2h1a2 2 0 012 2v11a2 2 0 01-2 2h-1a2 2 0 01-2-2v-5a2 2 0 012-2h1z"/></svg>
                                                     <p className="font-black italic text-xl uppercase tracking-tighter opacity-20">Waiting for query...</p>
+                                                    {annLabAvailable && (
+                                                        <p className="text-[10px] text-slate-400 mt-4 font-bold">也可直接拖动左侧 ANN 参数滑块，并切换到「ANN 参数对比」</p>
+                                                    )}
                                                 </div>
-                                            ) : (
+                                                        ) : (
                                                 <div className="space-y-6">
                                                     <div className="flex flex-wrap justify-between items-center gap-4 border-b pb-6">
                                                         <div className="flex items-center gap-2 flex-wrap">
@@ -1573,6 +1667,9 @@
                                                     </div>
                                                     )}
                                                 </div>
+                                                        )
+                                                    )}
+                                                </>
                                             )}
                                         </div>
                                     </div>
@@ -2061,6 +2158,13 @@
                                             {evalLoading ? <div className="spinner !w-6 !h-6 !border-white"></div> : '📊 评测全部 ANN'}
                                         </button>
                                     </div>
+
+                                    {hasExactBaseline && benchmarkIndices.length > 0 && (
+                                        <p className="text-xs text-slate-500 text-center py-3 px-4 bg-slate-50 rounded-2xl border border-slate-100">
+                                            实时调参请前往 <button type="button" onClick={() => setView('search')} className="font-black text-blue-600 hover:underline">检索平台</button>
+                                            ，在左侧「ANN 参数实验」拖动滑块，右侧查看对比。
+                                        </p>
+                                    )}
 
                                     {(evalResult || evalBatchResults?.length > 0) && (
                                         <div className="flex flex-wrap items-center justify-between gap-3 p-4 bg-emerald-50 border border-emerald-100 rounded-2xl">
@@ -2634,6 +2738,40 @@
                         })()}
 
                     </main>
+
+                    {showSearchHelp && (
+                        <div className="fixed inset-0 bg-slate-950/50 backdrop-blur-sm z-50 flex items-center justify-center p-6" onClick={() => setShowSearchHelp(false)}>
+                            <div className="bg-white rounded-[2rem] w-full max-w-lg max-h-[85vh] overflow-y-auto shadow-2xl p-8" onClick={e => e.stopPropagation()}>
+                                <div className="flex justify-between items-start mb-6">
+                                    <div>
+                                        <p className="text-[10px] font-black uppercase text-blue-500 tracking-widest">Help</p>
+                                        <h2 className="text-2xl font-black text-slate-900 mt-1">检索工作台使用指南</h2>
+                                    </div>
+                                    <button type="button" onClick={() => setShowSearchHelp(false)} className="w-10 h-10 rounded-full bg-slate-100 font-black text-slate-500 hover:bg-slate-200">×</button>
+                                </div>
+                                <div className="space-y-5 text-sm text-slate-600 leading-relaxed">
+                                    <section>
+                                        <h3 className="font-black text-slate-800 mb-1">① 基本检索</h3>
+                                        <p>选择数据集与索引，输入 Cell ID（或 Vector），点击「执行检索引擎」。Top-K 与索引类型在左侧配置，结果在右侧「检索结果」查看可视化或列表。</p>
+                                    </section>
+                                    <section>
+                                        <h3 className="font-black text-slate-800 mb-1">② 元数据过滤</h3>
+                                        <p>在「元数据过滤」选择字段与值，点 + 添加条件（AND 逻辑）。联合检索模式下同样支持跨库 filter。</p>
+                                    </section>
+                                    <section>
+                                        <h3 className="font-black text-slate-800 mb-1">③ ANN 参数实验</h3>
+                                        <p>需已构建 <strong>Exact</strong> 与 <strong>HNSW/IVF</strong> 索引。左侧出现「ANN 参数实验」面板：拖动滑块或选预设档位（省内存 / 平衡 / 高精度），实时对比 Exact 基线。右侧切换到「ANN 参数对比」查看 Top-K 差异与 Recall。</p>
+                                    </section>
+                                    <section>
+                                        <h3 className="font-black text-slate-800 mb-1">④ 结果解读</h3>
+                                        <p>点击邻居细胞可 1v1 对比；可勾选 LLM 生物学解释并导出 PDF/CSV。索引对比模式用于并行比较多种索引的重叠率。</p>
+                                    </section>
+                                </div>
+                                <button type="button" onClick={() => setShowSearchHelp(false)}
+                                    className="w-full mt-8 py-3 btn-primary rounded-2xl font-black text-sm">知道了</button>
+                            </div>
+                        </div>
+                    )}
 
                     {compareOpen && (
                         <div className="fixed inset-0 bg-slate-950/60 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={()=>{ setCompareOpen(false); CellCompare.destroyAll(); }}>

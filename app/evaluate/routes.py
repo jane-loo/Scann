@@ -328,6 +328,139 @@ def param_sweep(dataset_id):
         return jsonify({'error': str(e)}), 500
 
 
+def _pack_probe_hits(positions, distances, cell_ids, obs, k: int) -> list[dict]:
+    from ..search.filters import build_result_metadata
+    rows = []
+    for pos, dist in zip(positions[:k], distances[:k]):
+        cid = cell_ids[pos]
+        row = obs.iloc[pos]
+        sim = 1.0 / (1.0 + float(dist))
+        rows.append({
+            'rank': len(rows) + 1,
+            'cell_id': cid,
+            'cell_type': str(row.get('cell_type', '未知类型')),
+            'distance': round(float(dist), 6),
+            'similarity': round(sim, 6),
+            'metadata': build_result_metadata(row, obs),
+        })
+    return rows
+
+
+@evaluate_bp.route('/<int:dataset_id>/playground', methods=['POST'])
+def playground_probe(dataset_id):
+    """ANN 控制台：单 query 实时调参，返回延迟 / Recall@K / Exact vs ANN 对比。"""
+    from ..permissions import get_accessible_dataset
+    from ..index.recommend import runtime_playground_config
+    from ..data.loader import _dataset_cache
+
+    _, err, code = get_accessible_dataset(dataset_id)
+    if err:
+        return err, code
+
+    body = request.get_json() or {}
+    index_id = body.get('index_id')
+    cell_id = (body.get('cell_id') or '').strip()
+    k = max(1, min(int(body.get('k', 10)), 50))
+    nprobe = body.get('nprobe')
+    ef_search = body.get('ef_search')
+
+    if not index_id:
+        return jsonify({'error': '缺少 index_id'}), 400
+
+    target_index = db.session.get(AnnIndex, int(index_id))
+    if not target_index or target_index.dataset_id != dataset_id:
+        return jsonify({'error': '索引与数据集不匹配'}), 400
+    if target_index.index_type not in _ANN_INDEX_TYPES:
+        return jsonify({'error': '请选择 ANN 索引 (hnsw / ivf_flat / ivf_pq)'}), 400
+    if not index_is_usable(target_index):
+        return jsonify({'error': '索引未就绪，请先构建'}), 400
+
+    gt_index = _find_exact_baseline(dataset_id)
+    if not gt_index:
+        return jsonify({'error': '未找到 Exact 基线，请先构建 Exact 索引'}), 400
+
+    try:
+        import json as _json
+        _ensure_vectors(dataset_id)
+        vectors = _dataset_cache[dataset_id]['vectors']
+        cell_ids = _dataset_cache[dataset_id]['cell_ids']
+        obs = _dataset_cache[dataset_id]['obs']
+
+        if not cell_id:
+            cell_id = cell_ids[int(np.random.randint(len(cell_ids)))]
+
+        try:
+            qi = cell_ids.index(cell_id)
+        except ValueError:
+            return jsonify({'error': f'Cell ID {cell_id} 不存在'}), 404
+
+        q_vec = vectors[qi]
+        idx_params = _json.loads(target_index.params or '{}')
+        pg_cfg = runtime_playground_config(target_index.index_type, idx_params)
+
+        if target_index.index_type == 'hnsw':
+            ef_val = int(ef_search if ef_search is not None else pg_cfg['default'])
+            ef_val = max(pg_cfg['min'], min(pg_cfg['max'], ef_val))
+            t0 = time.time()
+            ann_pos, ann_dist = search_index(target_index, q_vec, k=k, ef_search=ef_val)
+            ann_ms = (time.time() - t0) * 1000
+            param_name, param_value = 'ef_search', ef_val
+        else:
+            np_val = int(nprobe if nprobe is not None else pg_cfg['default'])
+            np_val = max(pg_cfg['min'], min(pg_cfg['max'], np_val))
+            t0 = time.time()
+            ann_pos, ann_dist = search_index(target_index, q_vec, k=k, nprobe=np_val)
+            ann_ms = (time.time() - t0) * 1000
+            param_name, param_value = 'nprobe', np_val
+
+        t0 = time.time()
+        gt_pos, gt_dist = search_index(gt_index, q_vec, k=k)
+        exact_ms = (time.time() - t0) * 1000
+
+        ann_ids = [cell_ids[i] for i in ann_pos]
+        gt_ids = [cell_ids[i] for i in gt_pos]
+        recall = recall_at_k(ann_ids, gt_ids, k=k)
+        speedup = exact_ms / ann_ms if ann_ms > 0 else 1.0
+
+        ann_rows = _pack_probe_hits(ann_pos, ann_dist, cell_ids, obs, k)
+        exact_rows = _pack_probe_hits(gt_pos, gt_dist, cell_ids, obs, k)
+
+        ann_set = {r['cell_id'] for r in ann_rows}
+        exact_set = {r['cell_id'] for r in exact_rows}
+        entered = [r for r in ann_rows if r['cell_id'] not in exact_set]
+        exited = [r for r in exact_rows if r['cell_id'] not in ann_set]
+
+        ann_size = index_file_size_bytes(target_index)
+        exact_size = index_file_size_bytes(gt_index)
+
+        return jsonify({
+            'dataset_id': dataset_id,
+            'index_id': target_index.id,
+            'index_type': target_index.index_type,
+            'query_cell_id': cell_id,
+            'k': k,
+            'param_name': param_name,
+            'param_value': param_value,
+            'playground_config': pg_cfg,
+            'ann_latency_ms': round(ann_ms, 3),
+            'exact_latency_ms': round(exact_ms, 3),
+            'recall_at_k': round(recall, 4),
+            'speedup': round(speedup, 2),
+            'overlap_count': len(ann_set & exact_set),
+            'ann_results': ann_rows,
+            'exact_results': exact_rows,
+            'diff': {
+                'entered': [r['cell_id'] for r in entered],
+                'exited': [r['cell_id'] for r in exited],
+            },
+            'index_size_label': format_bytes(ann_size),
+            'exact_index_size_label': format_bytes(exact_size),
+            'memory_ratio': round(ann_size / exact_size, 3) if ann_size and exact_size else None,
+        })
+    except Exception as e:
+        return jsonify({'error': f'控制台探测失败: {str(e)}'}), 500
+
+
 @evaluate_bp.route('/<int:dataset_id>/report', methods=['GET'])
 @login_required_api
 @expert_required

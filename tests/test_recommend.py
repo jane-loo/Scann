@@ -24,6 +24,14 @@ def test_ivf_flat_nlist_reasonable():
     assert rec['params']['nprobe'] <= nlist
 
 
-def test_default_sweep_values_by_index_type():
-    assert len(recommend.default_sweep_values('hnsw')) >= 3
-    assert len(recommend.default_sweep_values('ivf_flat')) >= 3
+def test_runtime_playground_config_hnsw():
+    cfg = recommend.runtime_playground_config('hnsw', {'ef_search': 80})
+    assert cfg['param_name'] == 'ef_search'
+    assert cfg['default'] == 80
+    assert 'fast' in cfg['presets']
+
+
+def test_runtime_playground_config_ivf():
+    cfg = recommend.runtime_playground_config('ivf_flat', {'nlist': 64})
+    assert cfg['param_name'] == 'nprobe'
+    assert cfg['max'] <= 64
