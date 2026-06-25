@@ -310,7 +310,8 @@ def _load_index_from_file(ann_index: AnnIndex):
 def search_index(ann_index:    AnnIndex,
                  query_vector: np.ndarray,
                  k:            int = 10,
-                 nprobe:       int = 10) -> tuple[list[int], list[float]]:
+                 nprobe:       int = 10,
+                 ef_search:    int | None = None) -> tuple[list[int], list[float]]:
     """
     对已构建的索引执行 kNN 搜索。
 
@@ -327,7 +328,7 @@ def search_index(ann_index:    AnnIndex,
             _index_cache[ann_index.id] = idx
 
     if ann_index.index_type == 'hnsw':
-        return idx.search(query_vector, k=k)
+        return idx.search(query_vector, k=k, ef=ef_search)
     else:
         return idx.search(query_vector, k=k, nprobe=nprobe)
 

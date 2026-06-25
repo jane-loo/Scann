@@ -117,7 +117,8 @@ class HNSWIndex:
 
     def search(self,
                query: np.ndarray,
-               k:     int = 10) -> tuple[list[int], list[float]]:
+               k:     int = 10,
+               ef:    int | None = None) -> tuple[list[int], list[float]]:
         """
         kNN 搜索。
 
@@ -132,6 +133,9 @@ class HNSWIndex:
         """
         if self.index is None:
             raise RuntimeError('索引未就绪，请先 build() 或 load()')
+
+        if ef is not None:
+            self.index.set_ef(max(1, int(ef)))
 
         query = np.asarray(query, dtype=np.float32)
         if query.ndim == 1:

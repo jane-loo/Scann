@@ -130,6 +130,62 @@ def _run_single_benchmark(dataset_id: int, target_index: AnnIndex, k: int, n_que
     }
 
 
+def _run_param_sweep(dataset_id: int, target_index: AnnIndex, param_name: str,
+                     param_values: list, k: int, n_queries: int) -> list[dict]:
+    """扫描运行时参数 nprobe（IVF）或 ef_search（HNSW）对 Recall/延迟的影响。"""
+    gt_index = _find_exact_baseline(dataset_id)
+    if not gt_index:
+        raise RuntimeError('未找到 Exact 基线')
+
+    if target_index.index_type not in _ANN_INDEX_TYPES:
+        raise RuntimeError('仅支持 ANN 索引参数扫描')
+
+    is_hnsw = target_index.index_type == 'hnsw'
+    is_ivf = target_index.index_type in ('ivf_flat', 'ivf_pq')
+    if param_name == 'nprobe' and not is_ivf:
+        raise RuntimeError('nprobe 仅适用于 ivf_flat / ivf_pq')
+    if param_name == 'ef_search' and not is_hnsw:
+        raise RuntimeError('ef_search 仅适用于 hnsw')
+    if param_name not in ('nprobe', 'ef_search'):
+        raise RuntimeError('param_name 仅支持 nprobe 或 ef_search')
+
+    vectors = _ensure_vectors(dataset_id)
+    n_total = len(vectors)
+    n_queries = min(n_queries, n_total)
+    from ..data.loader import _dataset_cache
+    cell_ids = _dataset_cache[dataset_id]['cell_ids']
+
+    indices = np.random.choice(n_total, n_queries, replace=False)
+    query_vectors = vectors[indices]
+
+    rows = []
+    for pv in param_values:
+        recalls, latencies = [], []
+        for q_vec in query_vectors:
+            t0 = time.time()
+            if param_name == 'nprobe':
+                ann_pos, _ = search_index(target_index, q_vec, k=k, nprobe=int(pv))
+            else:
+                ann_pos, _ = search_index(target_index, q_vec, k=k, ef_search=int(pv))
+            latencies.append((time.time() - t0) * 1000)
+
+            gt_pos, _ = search_index(gt_index, q_vec, k=k)
+            gt_ids = [cell_ids[i] for i in gt_pos]
+            ann_ids = [cell_ids[i] for i in ann_pos]
+            recalls.append(recall_at_k(ann_ids, gt_ids, k=k))
+
+        avg_recall = float(np.mean(recalls))
+        avg_lat = float(np.mean(latencies))
+        rows.append({
+            'param_name': param_name,
+            'param_value': int(pv),
+            'recall_at_k': round(avg_recall, 4),
+            'avg_latency_ms': round(avg_lat, 2),
+            'index_type': target_index.index_type,
+        })
+    return rows
+
+
 @evaluate_bp.route('/reports', methods=['GET'])
 @login_required_api
 @expert_required
@@ -223,6 +279,53 @@ def trigger_batch_evaluate(dataset_id):
         'results': results,
         'errors': errors,
     })
+
+
+@evaluate_bp.route('/<int:dataset_id>/param_sweep', methods=['POST'])
+@login_required_api
+@expert_required
+def param_sweep(dataset_id):
+    """扫描 ANN 运行时参数（nprobe / ef_search）对 Recall 与延迟的影响。"""
+    ensure_evaluation_report_schema()
+    body = request.get_json() or {}
+    index_id = body.get('index_id')
+    param_name = body.get('param_name', 'nprobe')
+    param_values = body.get('param_values') or []
+    k = int(body.get('k', 10))
+    n_queries = int(body.get('n_queries', 30))
+
+    if not index_id:
+        return jsonify({'error': '缺少 index_id'}), 400
+    if not param_values:
+        from ..index.recommend import default_sweep_values
+        target = db.session.get(AnnIndex, index_id)
+        if not target:
+            return jsonify({'error': '索引不存在'}), 404
+        param_name = 'ef_search' if target.index_type == 'hnsw' else 'nprobe'
+        param_values = default_sweep_values(target.index_type)
+
+    target_index = db.session.get(AnnIndex, index_id)
+    if not target_index or target_index.dataset_id != dataset_id:
+        return jsonify({'error': '索引与数据集不匹配'}), 400
+    if not index_is_usable(target_index):
+        return jsonify({'error': '索引未就绪'}), 400
+
+    try:
+        rows = _run_param_sweep(
+            dataset_id, target_index, param_name,
+            [int(v) for v in param_values], k, n_queries,
+        )
+        return jsonify({
+            'dataset_id': dataset_id,
+            'index_id': index_id,
+            'index_type': target_index.index_type,
+            'param_name': param_name,
+            'k': k,
+            'n_queries': n_queries,
+            'results': rows,
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 @evaluate_bp.route('/<int:dataset_id>/report', methods=['GET'])

@@ -156,11 +156,69 @@
         });
     }
 
+    /** 参数扫描：Recall vs 延迟 trade-off 折线图 */
+    function renderParamSweep(canvasId, rows, options) {
+        destroy(canvasId);
+        const el = document.getElementById(canvasId);
+        if (!el || !rows?.length) return;
+
+        const labels = rows.map(r => String(r.param_value));
+        charts[canvasId] = new Chart(el.getContext('2d'), {
+            type: 'line',
+            data: {
+                labels,
+                datasets: [
+                    {
+                        label: 'Recall@K (%)',
+                        data: rows.map(r => r.recall_at_k * 100),
+                        borderColor: 'rgba(59, 130, 246, 1)',
+                        backgroundColor: 'rgba(59, 130, 246, 0.15)',
+                        yAxisID: 'y',
+                        tension: 0.25,
+                    },
+                    {
+                        label: '延迟 (ms)',
+                        data: rows.map(r => r.avg_latency_ms),
+                        borderColor: 'rgba(139, 92, 246, 1)',
+                        backgroundColor: 'rgba(139, 92, 246, 0.1)',
+                        yAxisID: 'y1',
+                        tension: 0.25,
+                    },
+                ],
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    title: {
+                        display: true,
+                        text: `参数扫描 · ${options?.paramName || 'param'} · ${options?.indexType || ''}`,
+                        font: { size: 14, weight: '800' },
+                    },
+                    legend: { position: 'top' },
+                },
+                scales: {
+                    x: { title: { display: true, text: options?.paramName || 'param' } },
+                    y: {
+                        type: 'linear', position: 'left', min: 0, max: 100,
+                        title: { display: true, text: 'Recall (%)' },
+                    },
+                    y1: {
+                        type: 'linear', position: 'right', min: 0,
+                        title: { display: true, text: 'Latency (ms)' },
+                        grid: { drawOnChartArea: false },
+                    },
+                },
+            },
+        });
+    }
+
     window.BenchmarkViz = {
         INDEX_ORDER,
         INDEX_LABELS,
         destroy,
         destroyAll,
         renderCombined,
+        renderParamSweep,
     };
 })();

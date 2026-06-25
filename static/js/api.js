@@ -49,11 +49,17 @@ const ScannAPI = {
     getIndex: (id) => api.get(`/api/indexes/${id}`),
     deleteIndex: (id) => api.delete(`/api/indexes/${id}`),
     searchJointIndex: (indexId, data) => api.post(`/api/indexes/${indexId}/search`, data),
+    getRecommendParams: (datasetId, indexType, nCells) => {
+        const qs = new URLSearchParams({ dataset_id: datasetId, index_type: indexType });
+        if (nCells != null && nCells > 0) qs.set('n_cells', String(nCells));
+        return api.get(`/api/indexes/recommend_params?${qs.toString()}`);
+    },
 
     // Search
     searchByCell: (data) => api.post('/api/search/by_cell_id', data),
     searchByVector: (data) => api.post('/api/search/by_vector', data),
     searchRandom: (data) => api.post('/api/search/random', data),
+    explainSearch: (data) => api.post('/api/search/explain', data),
     getQueryHistory: (params = {}) => {
         const qs = new URLSearchParams();
         Object.entries(params).forEach(([k, v]) => { if (v != null && v !== '') qs.set(k, v); });
@@ -72,6 +78,11 @@ const ScannAPI = {
         return api.get(`/api/evaluate/reports${q ? '?' + q : ''}`);
     },
     getEvaluationReport: (datasetId) => api.get(`/api/evaluate/${datasetId}/report`),
+    runParamSweep: (datasetId, data) => api.post(`/api/evaluate/${datasetId}/param_sweep`, data),
+
+    // Chat
+    getChatJointIndexes: (datasetId) =>
+        api.get(`/api/chat/joint_indexes${datasetId ? '?dataset_id=' + datasetId : ''}`),
 
     // Admin
     getUsers: () => api.get('/admin/users'),

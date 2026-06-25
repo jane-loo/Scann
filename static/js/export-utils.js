@@ -2,7 +2,7 @@
  * Scann 报告导出：JSON / CSV / Markdown / HTML
  */
 (function () {
-    const FORMATS = ['json', 'csv', 'md', 'html'];
+    const FORMATS = ['json', 'csv', 'md', 'html', 'pdf'];
 
     function downloadBlob(content, filename, mime) {
         const blob = new Blob([content], { type: mime + ';charset=utf-8' });
@@ -136,6 +136,10 @@ ${bodyHtml}
     function exportBenchmark(payload, format) {
         const rows = payload.batchResults?.length ? payload.batchResults : (payload.singleResult ? [payload.singleResult] : []);
         if (!rows.length) return alert('暂无 Benchmark 数据可导出，请先运行评测');
+        if (format === 'pdf') {
+            if (!window.ScannPdf) return alert('PDF 模块未加载');
+            return ScannPdf.exportBenchmark(payload);
+        }
         exportGeneric({
             title: 'Scann Benchmark 报告',
             filenamePrefix: 'scann_benchmark',
@@ -153,6 +157,10 @@ ${bodyHtml}
     function exportSearch(payload, format) {
         const rows = payload.results || [];
         if (!rows.length) return alert('暂无检索结果可导出');
+        if (format === 'pdf') {
+            if (!window.ScannPdf) return alert('PDF 模块未加载');
+            return ScannPdf.exportSearch(payload);
+        }
         exportGeneric({
             title: 'Scann 检索报告',
             filenamePrefix: 'scann_search',
@@ -182,6 +190,14 @@ ${bodyHtml}
 
     function exportEvalReports(reports, format, meta) {
         if (!reports?.length) return alert('暂无评测报告可导出');
+        if (format === 'pdf') {
+            if (!window.ScannPdf) return alert('PDF 模块未加载');
+            return ScannPdf.exportBenchmark({
+                batchResults: reports,
+                datasetName: meta?.筛选数据集,
+                topK: reports[0]?.k,
+            });
+        }
         exportGeneric({
             title: 'Scann 评测报告归档',
             filenamePrefix: 'scann_eval_reports',

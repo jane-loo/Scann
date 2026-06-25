@@ -6,6 +6,7 @@ import json
 from ..models import QueryHistory
 from ..decorators import login_required_api
 from ..permissions import get_accessible_dataset
+from ..chat.llm_client import explain_search_results
 
 engine = SearchEngine()
 
@@ -111,3 +112,29 @@ def get_history():
         'query_time': h.query_time,
         'created_at': h.created_at.isoformat()
     } for h in history])
+
+
+@search_bp.route('/explain', methods=['POST'])
+def explain_results():
+    """可选：LLM 解读当前检索结果（不引入静态知识库）。"""
+    data = request.get_json() or {}
+    if not data.get('enabled', True):
+        return jsonify({'error': '未启用生物学解释'}), 400
+
+    results = data.get('results') or []
+    if not results:
+        return jsonify({'error': '无检索结果'}), 400
+
+    try:
+        text = explain_search_results(
+            query_input=data.get('query_input', ''),
+            query_type=data.get('query_type', 'cell_id'),
+            results=results,
+            is_joint=bool(data.get('is_joint')),
+            filters=data.get('filters'),
+        )
+        return jsonify({'explanation': text})
+    except RuntimeError as e:
+        return jsonify({'error': str(e)}), 503
+    except Exception as e:
+        return jsonify({'error': f'解释生成失败: {str(e)}'}), 500

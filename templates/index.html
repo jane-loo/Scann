@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
@@ -33,6 +33,8 @@
     <script src="/static/js/search-viz.js"></script>
     <script src="/static/js/cell-compare.js"></script>
     <script src="/static/js/benchmark-viz.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    <script src="/static/js/pdf-export.js"></script>
     <script src="/static/js/export-utils.js"></script>
     <!-- classic JSX：避免 Babel automatic runtime 注入 import 导致白屏 -->
     <script type="text/babel" data-presets="react" data-presets-options='{"react":{"runtime":"classic","pragma":"React.createElement","pragmaFrag":"React.Fragment"}}'>
@@ -62,6 +64,7 @@
         ];
 
         const EXPORT_FORMATS = [
+            { id: 'pdf', label: 'PDF', highlight: true },
             { id: 'json', label: 'JSON' },
             { id: 'csv', label: 'CSV' },
             { id: 'md', label: 'Markdown' },
@@ -74,7 +77,11 @@
                 {EXPORT_FORMATS.map(f => (
                     <button key={f.id} type="button" disabled={disabled}
                         onClick={() => onExport(f.id)}
-                        className="px-2 py-1 rounded-lg text-[9px] font-black uppercase border border-slate-200 bg-white text-slate-600 hover:bg-blue-50 hover:border-blue-200 hover:text-blue-600 disabled:opacity-40">
+                        className={`px-2 py-1 rounded-lg text-[9px] font-black uppercase border disabled:opacity-40 ${
+                            f.highlight
+                                ? 'border-violet-300 bg-violet-50 text-violet-700 hover:bg-violet-100'
+                                : 'border-slate-200 bg-white text-slate-600 hover:bg-blue-50 hover:border-blue-200 hover:text-blue-600'
+                        }`}>
                         {f.label}
                     </button>
                 ))}
@@ -146,6 +153,34 @@
             }, [chatHistory]);
 
             const [chatVizTab, setChatVizTab] = useState('scatter');
+            const [chatUseJoint, setChatUseJoint] = useState(false);
+            const [chatJointIdxId, setChatJointIdxId] = useState('');
+            const [chatJointOptions, setChatJointOptions] = useState([]);
+
+            const [enableBioExplain, setEnableBioExplain] = useState(false);
+            const [searchBioExplain, setSearchBioExplain] = useState('');
+            const [bioExplainLoading, setBioExplainLoading] = useState(false);
+
+            const [autoRecommendParams, setAutoRecommendParams] = useState(false);
+            const [buildParams, setBuildParams] = useState({ M: 16, ef_construction: 200, nlist: 100, nprobe: 10, m_pq: 8, nbits: 8 });
+            const [paramRecommendHint, setParamRecommendHint] = useState('');
+
+            const [paramSweepResults, setParamSweepResults] = useState(null);
+            const [paramSweepLoading, setParamSweepLoading] = useState(false);
+
+            useEffect(() => {
+                if (!chatDatasetId || !chatUseJoint) {
+                    setChatJointOptions([]);
+                    return;
+                }
+                ScannAPI.getChatJointIndexes(Number(chatDatasetId)).then(list => {
+                    const opts = Array.isArray(list) ? list : [];
+                    setChatJointOptions(opts);
+                    if (opts.length && !opts.some(o => String(o.id) === String(chatJointIdxId))) {
+                        setChatJointIdxId(String(opts[0].id));
+                    }
+                }).catch(() => setChatJointOptions([]));
+            }, [chatDatasetId, chatUseJoint]);
 
             // 切换 tab 或结果更新时渲染图表
             useEffect(() => {
@@ -526,6 +561,8 @@
                     queryType: searchResults.query_type,
                     queryTimeMs: searchResults.query_time_ms || searchResults.time_ms,
                     isJoint: !!searchResults.is_joint,
+                    datasetName: datasets.find(d => String(d.id) === String(selectedDsId))?.name,
+                    bioExplain: enableBioExplain ? searchBioExplain : '',
                 }, format);
             };
 
@@ -536,7 +573,23 @@
                     datasetName: datasets.find(d => String(d.id) === String(selectedDsId))?.name,
                     datasetId: selectedDsId,
                     topK,
+                    paramSweep: paramSweepResults,
                 }, format);
+            };
+
+            const exportCellComparePdf = () => {
+                if (!compareData) return alert('暂无对比数据');
+                const dsId = compareHit?.dataset_id || selectedDsId;
+                ScannPdf.exportCellCompare({
+                    compareData,
+                    datasetId: dsId,
+                    datasetName: datasets.find(d => String(d.id) === String(dsId))?.name,
+                    queryCellId: resolveQueryCellId?.(),
+                    targetCellId: compareHit?.cell_id,
+                    rank: compareHit?.rank,
+                    searchSimilarity: compareHit?.similarity,
+                    searchDistance: compareHit?.distance,
+                });
             };
 
             const exportHistoryRecords = (format) => {
@@ -571,10 +624,30 @@
             const buildJointIdx = async () => {
                 if (jointBuildDsIds.length < 2) return alert('联合索引至少需要选择 2 个数据集');
                 try {
+                    let params = {};
+                    const firstDsId = Number(jointBuildDsIds[0]);
+                    if (autoRecommendParams) {
+                        const totalCells = jointBuildDsIds.reduce((sum, id) => {
+                            const ds = datasets.find(d => String(d.id) === String(id));
+                            return sum + (ds?.n_cells || 0);
+                        }, 0);
+                        const rec = await ScannAPI.getRecommendParams(firstDsId, jointBuildType, totalCells);
+                        params = rec.params || {};
+                        setParamRecommendHint(rec.summary || '');
+                    } else if (jointBuildType !== 'exact') {
+                        if (jointBuildType === 'hnsw') {
+                            params = { M: Number(buildParams.M), ef_construction: Number(buildParams.ef_construction) };
+                        } else if (jointBuildType === 'ivf_flat') {
+                            params = { nlist: Number(buildParams.nlist) };
+                        } else if (jointBuildType === 'ivf_pq') {
+                            params = { nlist: Number(buildParams.nlist), m_pq: Number(buildParams.m_pq), nbits: Number(buildParams.nbits) };
+                        }
+                    }
                     await ScannAPI.buildJointIndex({
                         dataset_ids: jointBuildDsIds.map(Number),
                         index_type: jointBuildType,
                         metric: buildMetric,
+                        params,
                     });
                     alert('联合索引构建任务已提交，请稍候刷新状态');
                     loadAll();
@@ -925,11 +998,70 @@
 
             const buildIdx = async (dsId, type, metric = buildMetric) => {
                 try {
-                    await ScannAPI.buildIndex({ dataset_id: dsId, index_type: type, metric });
+                    let params = {};
+                    if (autoRecommendParams) {
+                        const rec = await ScannAPI.getRecommendParams(dsId, type);
+                        params = rec.params || {};
+                        setParamRecommendHint(rec.summary || '');
+                        setBuildParams(prev => ({ ...prev, ...params }));
+                    } else if (type !== 'exact') {
+                        if (type === 'hnsw') {
+                            params = { M: Number(buildParams.M), ef_construction: Number(buildParams.ef_construction) };
+                        } else if (type === 'ivf_flat') {
+                            params = { nlist: Number(buildParams.nlist) };
+                        } else if (type === 'ivf_pq') {
+                            params = { nlist: Number(buildParams.nlist), m_pq: Number(buildParams.m_pq), nbits: Number(buildParams.nbits) };
+                        }
+                    }
+                    await ScannAPI.buildIndex({ dataset_id: dsId, index_type: type, metric, params });
                     alert(`${type.toUpperCase()} / ${metric.toUpperCase()} 构建任务已提交`);
                     loadAll();
                 } catch (e) { alert(e.error || "提交失败"); }
             };
+
+            const fetchBioExplain = async () => {
+                if (!searchResults?.results?.length) return;
+                setBioExplainLoading(true);
+                setSearchBioExplain('');
+                try {
+                    const res = await ScannAPI.explainSearch({
+                        enabled: true,
+                        results: searchResults.results,
+                        query_input: searchResults.query_cell_id || searchResults.query_input || queryInput,
+                        query_type: searchType === 'id' ? 'cell_id' : 'vector',
+                        is_joint: !!searchResults.is_joint,
+                        filters: searchResults.filters || filters,
+                    });
+                    setSearchBioExplain(res.explanation || '');
+                } catch (e) {
+                    alert(e.error || '生物学解释生成失败');
+                } finally {
+                    setBioExplainLoading(false);
+                }
+            };
+
+            const runParamSweep = async () => {
+                if (!evalIdxId) return alert('请先选择 ANN 索引');
+                if (!hasExactBaseline) return alert('需要 Exact 基线');
+                setParamSweepLoading(true);
+                setParamSweepResults(null);
+                try {
+                    const res = await ScannAPI.runParamSweep(selectedDsId, { index_id: Number(evalIdxId), k: Number(topK) });
+                    setParamSweepResults(res);
+                } catch (e) { alert(e.error || '参数扫描失败'); }
+                finally { setParamSweepLoading(false); }
+            };
+
+            useEffect(() => {
+                if (view !== 'eval' || !paramSweepResults?.results?.length) return;
+                const timer = requestAnimationFrame(() => {
+                    BenchmarkViz.renderParamSweep('bench-param-sweep-chart', paramSweepResults.results, {
+                        paramName: paramSweepResults.param_name,
+                        indexType: paramSweepResults.index_type,
+                    });
+                });
+                return () => cancelAnimationFrame(timer);
+            }, [view, paramSweepResults]);
 
             const deleteDataset = async (dsId, dsName) => {
                 if (!confirm(`确定删除数据集「${dsName}」及其所有索引？此操作不可撤销。`)) return;
@@ -1325,6 +1457,16 @@
                                                         <div className="text-right space-y-2">
                                                             <p className="text-[10px] font-black text-slate-400 uppercase">Search Time</p>
                                                             <p className="font-bold text-blue-600">{searchResults.query_time_ms.toFixed(2)}ms</p>
+                                                            <label className="flex items-center justify-end gap-2 text-[10px] font-bold text-slate-500 cursor-pointer">
+                                                                <input type="checkbox" checked={enableBioExplain} onChange={e => setEnableBioExplain(e.target.checked)} />
+                                                                LLM 生物学解释
+                                                            </label>
+                                                            {enableBioExplain && (
+                                                                <button type="button" onClick={fetchBioExplain} disabled={bioExplainLoading}
+                                                                    className="px-3 py-1 rounded-lg bg-violet-50 text-violet-600 text-[9px] font-black uppercase border border-violet-100 hover:bg-violet-100 disabled:opacity-50">
+                                                                    {bioExplainLoading ? '生成中…' : '生成解释'}
+                                                                </button>
+                                                            )}
                                                             <ExportMenu onExport={exportCurrentSearch} className="justify-end" />
                                                         </div>
                                                     </div>
@@ -1332,6 +1474,12 @@
                                                         <div className="p-10 text-center bg-red-50 rounded-3xl border border-red-100">
                                                             <p className="text-red-500 font-black"> 未找到符合过滤条件的细胞 </p>
                                                             <p className="text-xs text-red-400 mt-2 font-bold uppercase">Tips: 检查你的 Value 是否与该数据集中存在的标签完全一致。</p>
+                                                        </div>
+                                                    )}
+                                                    {enableBioExplain && searchBioExplain && (
+                                                        <div className="p-5 bg-violet-50 border border-violet-100 rounded-2xl text-sm text-violet-900 leading-relaxed">
+                                                            <p className="text-[10px] font-black uppercase text-violet-500 mb-2">LLM 生物学解读</p>
+                                                            <p className="whitespace-pre-wrap">{searchBioExplain}</p>
                                                         </div>
                                                     )}
                                                     {searchResults.is_joint && searchResults.results.length > 0 && resultView === 'list' && (
@@ -1634,6 +1782,26 @@
                                     <p className="text-[10px] text-slate-400 mt-3 font-medium">
                                         当前度量：<strong className="text-slate-600">{METRIC_OPTIONS.find(m => m.value === buildMetric)?.hint}</strong>
                                     </p>
+                                    <div className="mt-4 pt-4 border-t border-slate-200 space-y-3">
+                                        <label className="flex items-center gap-2 text-xs font-bold text-slate-700 cursor-pointer">
+                                            <input type="checkbox" checked={autoRecommendParams} onChange={e => setAutoRecommendParams(e.target.checked)} />
+                                            自动推荐索引参数（按细胞数）
+                                        </label>
+                                        {!autoRecommendParams && (
+                                            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                                                {[['M','HNSW M'],['ef_construction','ef_c'],['nlist','IVF nlist'],['nprobe','IVF nprobe']].map(([k, label]) => (
+                                                    <div key={k}>
+                                                        <label className="text-[9px] font-black text-slate-400 uppercase">{label}</label>
+                                                        <input type="number" className="w-full mt-1 p-2 rounded-lg border border-slate-200 text-xs font-bold"
+                                                            value={buildParams[k] ?? ''} onChange={e => setBuildParams(p => ({ ...p, [k]: Number(e.target.value) }))} />
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                        {paramRecommendHint && autoRecommendParams && (
+                                            <p className="text-[10px] text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-xl p-3">{paramRecommendHint}</p>
+                                        )}
+                                    </div>
                                 </section>
 
                                 <section className="space-y-6">
@@ -1899,10 +2067,32 @@
                                             <div>
                                                 <p className="text-xs font-black text-emerald-800 uppercase">ANN 量化报告已生成</p>
                                                 <p className="text-[11px] text-emerald-700 mt-1">
-                                                    指标：<strong>Recall@K</strong>（精度）· <strong>加速比</strong>（延迟）· <strong>索引大小 / 内存比</strong>（相对 Exact 的磁盘占用）
+                                                    指标：Recall@K · 加速比 · 索引大小 / 内存比 · 下方可进行参数扫描
                                                 </p>
                                             </div>
                                             <ExportMenu onExport={exportCurrentBenchmark} />
+                                        </div>
+                                    )}
+
+                                    {selectedEvalIndex && hasExactBaseline && (
+                                        <div className="rounded-2xl border border-slate-100 p-5 space-y-4 bg-white">
+                                            <div className="flex flex-wrap justify-between items-center gap-3">
+                                                <div>
+                                                    <h4 className="font-black text-sm uppercase text-slate-700">ANN 参数调优扫描</h4>
+                                                    <p className="text-[10px] text-slate-400 mt-1">
+                                                        HNSW 扫描 ef_search · IVF 扫描 nprobe（无需重建索引）
+                                                    </p>
+                                                </div>
+                                                <button type="button" onClick={runParamSweep} disabled={paramSweepLoading || !evalIdxId}
+                                                    className="px-5 py-2.5 bg-purple-600 text-white rounded-xl text-xs font-black uppercase disabled:opacity-50">
+                                                    {paramSweepLoading ? '扫描中…' : '运行参数扫描'}
+                                                </button>
+                                            </div>
+                                            {paramSweepResults?.results?.length > 0 && (
+                                                <div className="relative h-[320px] w-full">
+                                                    <canvas id="bench-param-sweep-chart" />
+                                                </div>
+                                            )}
                                         </div>
                                     )}
 
@@ -2154,6 +2344,8 @@
                                         message: userMsg,
                                         dataset_id: Number(chatDatasetId),
                                         history: historyForApi,
+                                        use_joint: chatUseJoint,
+                                        joint_index_id: chatUseJoint && chatJointIdxId ? Number(chatJointIdxId) : undefined,
                                     });
                                     setChatResult(res.data);
                                     setChatHistory(h => [...h, { role: 'assistant', content: res.data.analysis, data: res.data }]);
@@ -2204,6 +2396,27 @@
                                             </select>
                                         </div>
 
+                                        <div className="px-6 py-3 border-b border-slate-100 space-y-2">
+                                            <label className="flex items-center gap-2 text-xs font-bold text-slate-600 cursor-pointer">
+                                                <input type="checkbox" checked={chatUseJoint} onChange={e => setChatUseJoint(e.target.checked)} />
+                                                联合检索 + RAG（跨数据集）
+                                            </label>
+                                            {chatUseJoint && (
+                                                chatJointOptions.length > 0 ? (
+                                                    <select className="w-full text-xs border border-purple-200 rounded-xl px-3 py-2 font-bold text-purple-700 bg-purple-50"
+                                                        value={chatJointIdxId} onChange={e => setChatJointIdxId(e.target.value)}>
+                                                        {chatJointOptions.map(j => (
+                                                            <option key={j.id} value={j.id}>
+                                                                {j.index_type.toUpperCase()} · ds {j.dataset_ids?.join('+')} · {j.total_cells || '?'} cells
+                                                            </option>
+                                                        ))}
+                                                    </select>
+                                                ) : (
+                                                    <p className="text-[10px] text-amber-600">请先在「数据与索引」构建联合索引</p>
+                                                )
+                                            )}
+                                        </div>
+
                                         {/* Message list */}
                                         <div className="flex-1 overflow-y-auto p-4 space-y-4">
                                             {chatHistory.length === 0 && (
@@ -2211,7 +2424,7 @@
                                                     <div className="w-14 h-14 rounded-2xl bg-violet-50 flex items-center justify-center text-2xl">🧬</div>
                                                     <p className="text-sm font-bold text-slate-500">用自然语言描述你想找的细胞</p>
                                                     <div className="space-y-2 text-xs text-slate-400">
-                                                        {['找肝脏中的巨噬细胞，返回20个', '找与 DS0_CELL_0001 相似的细胞', '找与 CD4 T 细胞相似的细胞'].map(ex => (
+                                                        {['找肝脏中的巨噬细胞，返回20个', '找与 DS0_CELL_0001 相似的细胞', '在多个数据集中找相似的 NK 细胞'].map(ex => (
                                                             <button key={ex} onClick={() => setChatInput(ex)}
                                                                 className="block w-full text-left px-3 py-2 rounded-xl bg-slate-50 hover:bg-violet-50 hover:text-violet-600 transition-colors">
                                                                 "{ex}"
@@ -2241,10 +2454,11 @@
                                                                             {msg.data.search_mode_label}
                                                                         </span>
                                                                     )}
+                                                                    {msg.data.is_joint && (
+                                                                        <span className="text-[10px] bg-purple-50 text-purple-600 px-2 py-0.5 rounded-full font-bold">联合检索</span>
+                                                                    )}
                                                                     {msg.data.index_type && (
-                                                                        <span className="text-[10px] bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full font-bold">
-                                                                            {msg.data.index_type.toUpperCase()}
-                                                                        </span>
+                                                                        <span className="text-[10px] bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full font-bold uppercase">{msg.data.index_type}</span>
                                                                     )}
                                                                     {msg.data.query_time_ms > 0 && (
                                                                         <span className="text-[10px] text-slate-400">{msg.data.query_time_ms.toFixed(1)} ms</span>
@@ -2436,7 +2650,15 @@
                                             <p className="text-xs text-slate-400 mt-1 font-bold">检索排名 #{compareHit.rank}</p>
                                         )}
                                     </div>
-                                    <button onClick={()=>{ setCompareOpen(false); CellCompare.destroyAll(); }} className="w-10 h-10 rounded-full bg-slate-100 hover:bg-slate-200 font-black text-slate-500">×</button>
+                                    <div className="flex items-start gap-2">
+                                        {!compareLoading && compareData && (
+                                            <button type="button" onClick={exportCellComparePdf}
+                                                className="px-4 py-2 rounded-xl bg-violet-50 border border-violet-200 text-violet-700 text-[10px] font-black uppercase hover:bg-violet-100 shrink-0">
+                                                导出 PDF
+                                            </button>
+                                        )}
+                                        <button onClick={()=>{ setCompareOpen(false); CellCompare.destroyAll(); }} className="w-10 h-10 rounded-full bg-slate-100 hover:bg-slate-200 font-black text-slate-500">×</button>
+                                    </div>
                                 </div>
 
                                 <div className="p-8 space-y-8">

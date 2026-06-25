@@ -112,6 +112,39 @@ def build_index():
     }), 202
 
 
+@index_bp.route('/indexes/recommend_params', methods=['GET'])
+def recommend_params():
+    """根据数据集规模推荐索引构建参数（可选开关的后端）。"""
+    dataset_id = request.args.get('dataset_id', type=int)
+    index_type = request.args.get('index_type', 'hnsw')
+
+    if not dataset_id:
+        return jsonify({'error': '缺少 dataset_id'}), 400
+    if index_type not in _VALID_INDEX_TYPES:
+        return jsonify({'error': f'不支持的 index_type'}), 400
+
+    _, err, code = get_accessible_dataset(dataset_id)
+    if err:
+        return err, code
+
+    ds = db.session.get(Dataset, dataset_id)
+    if not ds:
+        return jsonify({'error': '数据集不存在'}), 404
+
+    n_cells_override = request.args.get('n_cells', type=int)
+    n_cells = n_cells_override if n_cells_override and n_cells_override > 0 else (ds.n_cells or 0)
+
+    from .recommend import recommend_index_params
+    rec = recommend_index_params(n_cells, index_type, ds.n_dims or 30)
+    return jsonify({
+        'dataset_id': dataset_id,
+        'index_type': index_type,
+        'n_cells': ds.n_cells,
+        'n_dims': ds.n_dims,
+        **rec,
+    })
+
+
 # ──────────────────────────────────────────────
 # 联合索引构建（7.3 加分项）
 # ──────────────────────────────────────────────
