@@ -22,6 +22,7 @@ from ..models import db, AnnIndex, Dataset, QueryHistory
 from ..decorators import login_required_api
 from ..permissions import visible_datasets_query, get_accessible_dataset, can_manage_data
 from ..data.loader import _dataset_cache, load_dataset, cache_dataset
+from ..search.filters import compute_expanded_k, row_matches_filters, build_result_metadata
 from .manager import (
     build_index_async, build_joint_index_async,
     search_index, search_joint_index,
@@ -258,6 +259,7 @@ def search(index_id):
     query_type = body.get('query_type', 'cell_id')
     top_k      = max(1, min(int(body.get('top_k', 10)), 200))
     nprobe     = max(1, int(body.get('nprobe', 10)))
+    filters    = body.get('filters') or {}
     dataset_id = ann_index.dataset_id
 
     if dataset_id not in _dataset_cache:
@@ -305,21 +307,39 @@ def search(index_id):
     else:
         return jsonify({'error': f'不支持的 query_type: {query_type}'}), 400
 
+    exclude_cell_id = query_repr if query_type in ('cell_id', 'random') else None
+    search_k = compute_expanded_k(top_k, exclude_self=bool(exclude_cell_id), filters=filters)
+
     try:
-        indices, distances = search_index(ann_index, query_vec, k=top_k, nprobe=nprobe)
+        indices, distances = search_index(ann_index, query_vec, k=search_k, nprobe=nprobe)
     except RuntimeError as e:
         return jsonify({'error': str(e)}), 500
 
     elapsed_ms = round((time.time() - t0) * 1000, 2)
 
     results = []
-    for rank, (pos, dist) in enumerate(zip(indices, distances), start=1):
+    for pos, dist in zip(indices, distances):
         if not (0 <= pos < len(cell_ids)):
             continue
-        row  = obs.iloc[pos]
-        meta = {col: str(row[col]) for col in _META_COLS if col in obs.columns}
-        results.append({'rank': rank, 'cell_id': cell_ids[pos],
-                        'distance': float(dist), **meta})
+        current_cell_id = cell_ids[pos]
+        if exclude_cell_id and current_cell_id == exclude_cell_id:
+            continue
+        row = obs.iloc[pos]
+        if not row_matches_filters(row, filters):
+            continue
+        meta = build_result_metadata(row, obs)
+        similarity = 1.0 / (1.0 + float(dist))
+        results.append({
+            'rank': len(results) + 1,
+            'cell_id': current_cell_id,
+            'distance': float(dist),
+            'similarity': similarity,
+            'cell_type': str(row.get('cell_type', '未知类型')),
+            'metadata': meta,
+            **{col: meta[col] for col in _META_COLS if col in meta},
+        })
+        if len(results) >= top_k:
+            break
 
     user_id = current_user.id if current_user.is_authenticated else None
     _write_history(user_id, dataset_id, query_type,
@@ -332,6 +352,7 @@ def search(index_id):
         'query_type':    query_type,
         'query_input':   str(query_repr),
         'top_k':         top_k,
+        'filters':       filters,
         'query_time_ms': elapsed_ms,
         'results':       results,
     })
@@ -343,6 +364,7 @@ def _joint_search(ann_index: AnnIndex, params_dict: dict):
     query_type  = body.get('query_type', 'random')
     top_k       = max(1, min(int(body.get('top_k', 10)), 200))
     nprobe      = max(1, int(body.get('nprobe', 10)))
+    filters     = body.get('filters') or {}
     dataset_ids = params_dict.get('dataset_ids', [])
 
     # 确保所有数据集均已缓存
@@ -407,9 +429,11 @@ def _joint_search(ann_index: AnnIndex, params_dict: dict):
     else:
         return jsonify({'error': f'不支持的 query_type: {query_type}'}), 400
 
-    search_k = top_k
-    if exclude_cell_id:
-        search_k = min(top_k * 10, 2000)
+    search_k = compute_expanded_k(
+        top_k,
+        exclude_self=bool(exclude_cell_id),
+        filters=filters,
+    )
 
     try:
         raw_results = search_joint_index(ann_index, query_vec, k=search_k, nprobe=nprobe)
@@ -418,7 +442,6 @@ def _joint_search(ann_index: AnnIndex, params_dict: dict):
 
     elapsed_ms = round((time.time() - t0) * 1000, 2)
 
-    # 附加元数据（排除查询细胞自身，与单库检索一致）
     results = []
     for item in raw_results:
         if exclude_cell_id and item['cell_id'] == exclude_cell_id:
@@ -426,17 +449,28 @@ def _joint_search(ann_index: AnnIndex, params_dict: dict):
         ds_id = item['dataset_id']
         pos   = item['pos_in_dataset']
         meta  = {}
+        row   = None
         if ds_id in _dataset_cache:
             obs = _dataset_cache[ds_id]['obs']
             if pos < len(obs):
                 row = obs.iloc[pos]
-                meta = {col: str(row[col]) for col in _META_COLS if col in obs.columns}
+                if not row_matches_filters(row, filters):
+                    continue
+                meta = build_result_metadata(row, obs)
+        elif filters:
+            continue
+
+        dist = item['distance']
+        similarity = 1.0 / (1.0 + float(dist))
         results.append({
             'rank':       len(results) + 1,
             'dataset_id': ds_id,
             'cell_id':    item['cell_id'],
-            'distance':   item['distance'],
-            **meta,
+            'distance':   dist,
+            'similarity': similarity,
+            'cell_type':  str(row.get('cell_type', meta.get('cell_type', '未知类型'))) if row is not None else meta.get('cell_type', '未知类型'),
+            'metadata':   meta,
+            **{col: meta[col] for col in _META_COLS if col in meta},
         })
         if len(results) >= top_k:
             break
@@ -454,6 +488,7 @@ def _joint_search(ann_index: AnnIndex, params_dict: dict):
         'query_input':   str(query_repr),
         'query_cell_id': query_cell_id or ('Vector' if query_type == 'vector' else None),
         'top_k':         top_k,
+        'filters':       filters,
         'query_time_ms': elapsed_ms,
         'results':       results,
     })

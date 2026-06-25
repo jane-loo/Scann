@@ -79,6 +79,8 @@ class EvaluationReport(db.Model):
     avg_latency = db.Column(db.Float)
     n_queries   = db.Column(db.Integer)
     k           = db.Column(db.Integer)
+    index_size_bytes = db.Column(db.Float)
+    exact_index_size_bytes = db.Column(db.Float)
     created_at  = db.Column(db.DateTime, default=datetime.utcnow)
 
     index = db.relationship('AnnIndex', backref='reports')

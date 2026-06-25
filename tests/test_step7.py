@@ -362,6 +362,22 @@ class TestJointSearch:
         resp = auth_client.post(f'/api/indexes/{joint_exact_id}/search',
                                 json={'query_type': 'random', 'top_k': 5})
         assert resp.status_code == 200
+
+    def test_joint_search_with_metadata_filter(self, auth_client, joint_hnsw_id):
+        resp = auth_client.post(f'/api/indexes/{joint_hnsw_id}/search',
+                                json={
+                                    'query_type': 'random',
+                                    'top_k': 10,
+                                    'filters': {'cell_type': ['T cell']},
+                                })
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body.get('filters') == {'cell_type': ['T cell']}
+        results = body['results']
+        assert len(results) >= 1
+        for r in results:
+            ctype = r.get('cell_type') or r.get('metadata', {}).get('cell_type')
+            assert ctype == 'T cell'
         assert len(resp.get_json()['results']) == 5
 
     def test_distances_ascending(self, auth_client, joint_hnsw_id):

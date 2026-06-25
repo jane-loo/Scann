@@ -5,6 +5,7 @@ import pandas as pd
 from ..models import db, Dataset, AnnIndex, QueryHistory
 from ..data.loader import _dataset_cache, load_dataset, cache_dataset
 from ..index.manager import search_index, index_is_usable, effective_index_status
+from .filters import compute_expanded_k, row_matches_filters, build_result_metadata
 
 class SearchEngine:
     def _ensure_data(self, dataset_id: int):
@@ -71,9 +72,7 @@ class SearchEngine:
             raise ValueError(f"索引 {index_id} 不可用 (状态: {status})，请先构建索引")
 
         # 为了排除自身或进行过滤，扩大搜索范围
-        search_k = top_k
-        if exclude_cell_id or filters:
-            search_k = min(top_k * 10, 2000) # 扩大10倍搜索，最多2000
+        search_k = compute_expanded_k(top_k, exclude_self=bool(exclude_cell_id), filters=filters)
 
         t0 = time.time()
         # 调用 index/manager.py 中的搜索函数
@@ -94,39 +93,20 @@ class SearchEngine:
                 
             row = obs.iloc[i]
             
-            # 2. 应用过滤 (Exact Match in List)
-            if filters:
-                match = True
-                for key, val_list in filters.items():
-                    # 检查列是否存在
-                    if key not in row:
-                        match = False
-                        break
-                    
-                    # 后端支持单值或列表过滤
-                    target_val = str(row[key])
-                    if isinstance(val_list, list):
-                        if target_val not in [str(v) for v in val_list]:
-                            match = False
-                            break
-                    else:
-                        if target_val != str(val_list):
-                            match = False
-                            break
-                if not match:
-                    continue
+            if not row_matches_filters(row, filters):
+                continue
 
             # 3. 计算相似度 score = 1 / (1 + distance)
             similarity = 1.0 / (1.0 + float(dist))
             
             res = {
                 'rank': len(results) + 1,
-                'cell_id': current_cell_id,           # 保持后端字段名
-                'cell_index': current_cell_id,        # 兼容前端字段名
+                'cell_id': current_cell_id,
+                'cell_index': current_cell_id,
                 'distance': float(dist),
                 'similarity': similarity,
-                'cell_type': str(row.get('cell_type', '未知类型')), # 直接提取 cell_type 方便前端
-                'metadata': {col: str(row[col]) for col in obs.columns if not pd.isna(row[col])}
+                'cell_type': str(row.get('cell_type', '未知类型')),
+                'metadata': build_result_metadata(row, obs),
             }
             results.append(res)
             

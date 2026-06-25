@@ -120,6 +120,12 @@
                                 if (row.avg_exact_time_ms != null && row.index_type !== 'exact') {
                                     lines.push(`Exact 基线: ${row.avg_exact_time_ms.toFixed(2)} ms`);
                                 }
+                                if (row.index_size_label) {
+                                    lines.push(`索引大小: ${row.index_size_label}`);
+                                }
+                                if (row.memory_ratio != null && row.index_type !== 'exact') {
+                                    lines.push(`相对 Exact 内存: ${(row.memory_ratio * 100).toFixed(1)}%`);
+                                }
                                 return lines;
                             },
                         },

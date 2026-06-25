@@ -5,10 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Scann Pro - Full Suite</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+    <script src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+    <script src="https://unpkg.com/axios@1.6.8/dist/axios.min.js"></script>
     <style>
         .spinner { border: 3px solid #f3f3f3; border-top: 3px solid #3b82f6; border-radius: 50%; width: 24px; height: 24px; animation: spin 1s linear infinite; }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
@@ -33,7 +33,9 @@
     <script src="/static/js/search-viz.js"></script>
     <script src="/static/js/cell-compare.js"></script>
     <script src="/static/js/benchmark-viz.js"></script>
-    <script type="text/babel">
+    <script src="/static/js/export-utils.js"></script>
+    <!-- classic JSX：避免 Babel automatic runtime 注入 import 导致白屏 -->
+    <script type="text/babel" data-presets="react" data-presets-options='{"react":{"runtime":"classic","pragma":"React.createElement","pragmaFrag":"React.Fragment"}}'>
         const { useState, useEffect, useMemo } = React;
 
         const ROLE_LABELS = {
@@ -58,6 +60,26 @@
             { value: 'l2', label: 'L2', hint: '欧氏距离 · 默认 ANN 度量' },
             { value: 'cosine', label: 'Cosine', hint: 'L2 归一化 + 内积 · 方向相似度' },
         ];
+
+        const EXPORT_FORMATS = [
+            { id: 'json', label: 'JSON' },
+            { id: 'csv', label: 'CSV' },
+            { id: 'md', label: 'Markdown' },
+            { id: 'html', label: 'HTML' },
+        ];
+
+        const ExportMenu = ({ onExport, disabled, className = '' }) => (
+            <div className={`flex flex-wrap items-center gap-1 ${className}`}>
+                <span className="text-[9px] font-black uppercase text-slate-400 mr-1">导出</span>
+                {EXPORT_FORMATS.map(f => (
+                    <button key={f.id} type="button" disabled={disabled}
+                        onClick={() => onExport(f.id)}
+                        className="px-2 py-1 rounded-lg text-[9px] font-black uppercase border border-slate-200 bg-white text-slate-600 hover:bg-blue-50 hover:border-blue-200 hover:text-blue-600 disabled:opacity-40">
+                        {f.label}
+                    </button>
+                ))}
+            </div>
+        );
 
         const App = () => {
             const [user, setUser] = useState(null);
@@ -292,6 +314,25 @@
                 return `${idx.index_type.toUpperCase()} · ${names}${cells}`;
             };
 
+            const jointFilterContext = useMemo(() => {
+                if (!selectedJointIdxId) return null;
+                const ji = indices.find(i => String(i.id) === String(selectedJointIdxId));
+                if (!ji?.params?.dataset_ids) return null;
+                const dsList = ji.params.dataset_ids
+                    .map(id => datasets.find(d => d.id === Number(id)))
+                    .filter(Boolean);
+                const obsUnion = [...new Set(dsList.flatMap(d => d.obs_columns || []))];
+                const mergedOptions = {};
+                dsList.forEach(d => {
+                    Object.entries(d.cell_type_distribution || {}).forEach(([k, vals]) => {
+                        mergedOptions[k] = [...new Set([...(mergedOptions[k] || []), ...(vals || [])])];
+                    });
+                });
+                return { obs_columns: obsUnion, filterOptions: mergedOptions, name: jointIndexLabel(ji) };
+            }, [selectedJointIdxId, indices, datasets]);
+
+            const activeFilterContext = jointSearchMode ? jointFilterContext : currentDataset;
+
             const benchmarkIndices = useMemo(() =>
                 readyIndices.filter(i => i.index_type !== 'exact'),
             [readyIndices]);
@@ -328,6 +369,9 @@
                             speedup: 1,
                             avg_ann_time_ms: exactMs,
                             avg_exact_time_ms: exactMs,
+                            index_size_mb: byType.hnsw?.exact_index_size_mb ?? singleResult?.exact_index_size_mb ?? null,
+                            memory_ratio: 1,
+                            index_size_label: byType.hnsw?.exact_index_size_label ?? singleResult?.exact_index_size_label ?? null,
                             present: builtTypes.has('exact') && !!exactMs,
                         };
                     }
@@ -338,6 +382,9 @@
                         speedup: r?.speedup ?? null,
                         avg_ann_time_ms: r?.avg_ann_time_ms ?? null,
                         avg_exact_time_ms: r?.avg_exact_time_ms ?? exactMs,
+                        index_size_mb: r?.index_size_mb ?? null,
+                        memory_ratio: r?.memory_ratio ?? null,
+                        index_size_label: r?.index_size_label ?? null,
                         present: !!r,
                     };
                 });
@@ -395,16 +442,19 @@
                 if (currentDataset && !currentDataset.obs_columns.includes(filterKey)) {
                     setFilterKey(currentDataset.obs_columns[0] || '');
                 }
-
-                // 获取当前数据集所有列的所有唯一值，用于前端下拉框展示
-                if (selectedDsId) {
+                if (jointSearchMode && jointFilterContext?.obs_columns?.length) {
+                    if (!jointFilterContext.obs_columns.includes(filterKey)) {
+                        setFilterKey(jointFilterContext.obs_columns[0] || '');
+                    }
+                    setFilterOptions(jointFilterContext.filterOptions || {});
+                } else if (selectedDsId) {
                     ScannAPI.getDatasetDetail(selectedDsId).then(data => {
                         // 假设后端详情接口返回了 cell_type_distribution，我们从中提取唯一值
                         // 或者动态从 UMAP 数据中提取（为了演示，这里使用 cache 或模拟获取）
                         setFilterOptions(data.cell_type_distribution || {});
                     });
                 }
-            }, [readyIndices, currentDataset, selectedDsId]);
+            }, [readyIndices, currentDataset, selectedDsId, jointSearchMode, jointFilterContext]);
 
             useEffect(() => {
                 if (benchmarkIndices.length === 0) {
@@ -460,9 +510,52 @@
                 };
             };
 
+            const collectSearchFilters = () => {
+                const searchFilters = { ...filters };
+                if (filterKey && filterVal) {
+                    searchFilters[filterKey] = [filterVal];
+                }
+                return searchFilters;
+            };
+
+            const exportCurrentSearch = (format) => {
+                if (!searchResults?.results?.length) return alert('暂无检索结果可导出');
+                ScannExport.exportSearch({
+                    results: searchResults.results,
+                    queryInput: searchResults.query_cell_id || searchResults.query_input,
+                    queryType: searchResults.query_type,
+                    queryTimeMs: searchResults.query_time_ms || searchResults.time_ms,
+                    isJoint: !!searchResults.is_joint,
+                }, format);
+            };
+
+            const exportCurrentBenchmark = (format) => {
+                ScannExport.exportBenchmark({
+                    batchResults: evalBatchResults,
+                    singleResult: evalResult,
+                    datasetName: datasets.find(d => String(d.id) === String(selectedDsId))?.name,
+                    datasetId: selectedDsId,
+                    topK,
+                }, format);
+            };
+
+            const exportHistoryRecords = (format) => {
+                ScannExport.exportQueryHistory(queryHistory, format, {
+                    记录数: queryHistory.length,
+                    筛选数据集: recordsDsFilter ? datasetNameById(recordsDsFilter) : '全部',
+                });
+            };
+
+            const exportEvalRecords = (format) => {
+                ScannExport.exportEvalReports(evalReports, format, {
+                    报告数: evalReports.length,
+                    筛选数据集: recordsDsFilter ? datasetNameById(recordsDsFilter) : '全部',
+                });
+            };
+
             const runJointSearch = async (query_type, query_input) => {
                 if (!selectedJointIdxId) throw { error: '请先在「数据与索引」构建联合索引，或选择 ready 的联合索引' };
-                const body = { query_type, top_k: Number(topK) };
+                const body = { query_type, top_k: Number(topK), filters: collectSearchFilters() };
                 if (query_input !== undefined && query_input !== null) body.query_input = query_input;
                 const raw = await ScannAPI.searchJointIndex(Number(selectedJointIdxId), body);
                 return normalizeJointSearchResponse(raw);
@@ -667,10 +760,7 @@
                 setCompareResults(null);
                 
                 // 使用已存储的多重过滤器，如果当前下拉框也有选择值则临时加入
-                const searchFilters = { ...filters };
-                if (filterKey && filterVal) {
-                    searchFilters[filterKey] = [filterVal];
-                }
+                const searchFilters = collectSearchFilters();
 
                 try {
                     let res;
@@ -1084,10 +1174,11 @@
                                             </div>
                                         </section>
 
-                                        {!jointSearchMode && (
                                         <section className="card p-6 space-y-4">
                                             <div className="flex justify-between items-center">
-                                                <h3 className="text-[10px] font-black uppercase text-slate-400 tracking-widest">2. 元数据过滤 (多重)</h3>
+                                                <h3 className="text-[10px] font-black uppercase text-slate-400 tracking-widest">
+                                                    2. 元数据过滤 (多重){jointSearchMode ? ' · 联合检索' : ''}
+                                                </h3>
                                                 <button onClick={()=>{setFilters({}); setFilterVal('');}} className="text-[10px] font-black text-blue-600 uppercase">清除全部</button>
                                             </div>
                                             
@@ -1112,7 +1203,7 @@
                                                     <div className="flex-1">
                                                         <label className="text-[9px] font-black text-slate-400 uppercase">字段</label>
                                                         <select className="w-full p-2 bg-slate-50 rounded-xl text-xs font-bold border-none" value={filterKey} onChange={e=>setFilterKey(e.target.value)}>
-                                                            {currentDataset?.obs_columns.map(c => <option key={c} value={c}>{c}</option>)}
+                                                            {(activeFilterContext?.obs_columns || currentDataset?.obs_columns || []).map(c => <option key={c} value={c}>{c}</option>)}
                                                         </select>
                                                     </div>
                                                     <div className="flex-[2]">
@@ -1135,10 +1226,13 @@
                                                         </div>
                                                     </div>
                                                 </div>
-                                                <p className="text-[9px] text-slate-400 italic">点 + 号添加多个过滤条件，它们将以 AND 逻辑共同作用。</p>
+                                                <p className="text-[9px] text-slate-400 italic">
+                                                    {jointSearchMode
+                                                        ? '联合检索支持跨数据集 metadata 过滤（AND 逻辑）。'
+                                                        : '点 + 号添加多个过滤条件，它们将以 AND 逻辑共同作用。'}
+                                                </p>
                                             </div>
                                         </section>
-                                        )}
 
                                         <button onClick={runSearch} disabled={searchLoading || (jointSearchMode ? !selectedJointIdxId : (indexCompareMode ? readyIndices.length < 2 : !selectedIdxId))} className="w-full py-5 btn-primary rounded-3xl font-black text-lg shadow-xl shadow-blue-500/20 flex items-center justify-center gap-3 disabled:opacity-30">
                                             {searchLoading ? <div className="spinner !border-white"></div> : (jointSearchMode ? '执行联合检索' : (indexCompareMode ? '执行多索引对比' : '执行检索引擎'))}
@@ -1228,9 +1322,10 @@
                                                                 <button onClick={()=>setResultView('list')} className={`px-4 py-2 rounded-lg text-[10px] font-black uppercase ${resultView==='list'?'bg-white shadow text-blue-600':'text-slate-400'}`}>详细列表</button>
                                                             </div>
                                                         </div>
-                                                        <div className="text-right">
+                                                        <div className="text-right space-y-2">
                                                             <p className="text-[10px] font-black text-slate-400 uppercase">Search Time</p>
                                                             <p className="font-bold text-blue-600">{searchResults.query_time_ms.toFixed(2)}ms</p>
+                                                            <ExportMenu onExport={exportCurrentSearch} className="justify-end" />
                                                         </div>
                                                     </div>
                                                     {searchResults.results.length === 0 && (
@@ -1357,6 +1452,12 @@
                                             className="px-5 py-3 bg-slate-900 text-white rounded-xl text-xs font-black uppercase hover:bg-slate-800 disabled:opacity-50">
                                             {recordsLoading ? '刷新中…' : '刷新'}
                                         </button>
+                                        {recordsTab === 'history' && queryHistory.length > 0 && (
+                                            <ExportMenu onExport={exportHistoryRecords} />
+                                        )}
+                                        {recordsTab === 'eval' && isExpert && evalReports.length > 0 && (
+                                            <ExportMenu onExport={exportEvalRecords} />
+                                        )}
                                     </div>
                                 </header>
 
@@ -1446,6 +1547,8 @@
                                                             <th className="text-left p-4">Recall@K</th>
                                                             <th className="text-left p-4">QPS</th>
                                                             <th className="text-left p-4">ANN 延迟</th>
+                                                            <th className="text-left p-4">索引大小</th>
+                                                            <th className="text-left p-4">内存比</th>
                                                             <th className="text-left p-4">采样</th>
                                                         </tr>
                                                     </thead>
@@ -1462,6 +1565,8 @@
                                                                 </td>
                                                                 <td className="p-4 font-bold text-xs">{(r.qps || 0).toFixed(1)}</td>
                                                                 <td className="p-4 text-blue-600 font-bold text-xs">{(r.avg_latency_ms || 0).toFixed(2)} ms</td>
+                                                                <td className="p-4 text-xs text-slate-600 font-bold">{r.index_size_label || '—'}</td>
+                                                                <td className="p-4 text-xs text-purple-600 font-bold">{r.memory_ratio != null ? `${(r.memory_ratio * 100).toFixed(1)}%` : '—'}</td>
                                                                 <td className="p-4 text-xs text-slate-500">{r.n_queries} × K={r.k}</td>
                                                             </tr>
                                                         ))}
@@ -1789,13 +1894,25 @@
                                         </button>
                                     </div>
 
+                                    {(evalResult || evalBatchResults?.length > 0) && (
+                                        <div className="flex flex-wrap items-center justify-between gap-3 p-4 bg-emerald-50 border border-emerald-100 rounded-2xl">
+                                            <div>
+                                                <p className="text-xs font-black text-emerald-800 uppercase">ANN 量化报告已生成</p>
+                                                <p className="text-[11px] text-emerald-700 mt-1">
+                                                    指标：<strong>Recall@K</strong>（精度）· <strong>加速比</strong>（延迟）· <strong>索引大小 / 内存比</strong>（相对 Exact 的磁盘占用）
+                                                </p>
+                                            </div>
+                                            <ExportMenu onExport={exportCurrentBenchmark} />
+                                        </div>
+                                    )}
+
                                     <div className="rounded-[2rem] border-2 border-slate-100 bg-gradient-to-br from-slate-50 to-white p-6 space-y-4">
                                         <div className="flex flex-wrap justify-between items-start gap-3">
                                             <div>
                                                 <h4 className="font-black text-lg uppercase tracking-tight">四索引对比图</h4>
                                                 <p className="text-xs text-slate-500 mt-1 max-w-lg">
                                                     左轴 Recall@{topK}、右轴加速比；Exact 为准确度基线（100% / 1×）。
-                                                    答辩可直接展示 ANN 在速度-精度上的权衡。
+                                                    表格中补充索引文件大小与相对 Exact 的内存占比。
                                                 </p>
                                             </div>
                                             <div className="flex flex-wrap gap-2">
@@ -1826,34 +1943,52 @@
                                     </div>
 
                                     {evalResult && !evalBatchResults && (
-                                        <div className="grid grid-cols-2 gap-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
-                                            <div className="col-span-2 text-center">
+                                        <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                                            <div className="text-center">
                                                 <span className="px-4 py-1.5 bg-blue-100 text-blue-700 rounded-full text-xs font-black uppercase">
                                                     {evalResult.index_type} vs exact
                                                 </span>
                                             </div>
+                                            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                                             <div className="p-10 bg-slate-950 text-white rounded-[3rem] shadow-xl">
-                                                <p className="text-xs font-black uppercase text-blue-400 mb-2">SPEEDUP RATIO</p>
+                                                <p className="text-xs font-black uppercase text-blue-400 mb-2">SPEEDUP · 延迟</p>
                                                 <div className="flex items-baseline gap-2">
                                                     <span className="text-6xl font-black">{evalResult.speedup.toFixed(1)}</span>
-                                                    <span className="text-2xl font-bold opacity-50">X</span>
+                                                    <span className="text-2xl font-bold opacity-50">×</span>
                                                 </div>
-                                                <p className="mt-4 text-[10px] font-medium opacity-40">Exact 平均 {evalResult.avg_exact_time_ms?.toFixed(2)} ms · ANN 平均 {evalResult.avg_ann_time_ms?.toFixed(2)} ms</p>
+                                                <p className="mt-4 text-[10px] font-medium opacity-40">
+                                                    Exact {evalResult.avg_exact_time_ms?.toFixed(2)} ms · ANN {evalResult.avg_ann_time_ms?.toFixed(2)} ms
+                                                </p>
                                             </div>
                                             <div className="p-10 bg-blue-600 text-white rounded-[3rem] shadow-xl">
-                                                <p className="text-xs font-black uppercase text-blue-100 mb-2">RECALL @{evalResult.k || topK}</p>
+                                                <p className="text-xs font-black uppercase text-blue-100 mb-2">RECALL · 精度</p>
                                                 <div className="flex items-baseline gap-2">
                                                     <span className="text-6xl font-black">{(evalResult.recall_at_k * 100).toFixed(1)}</span>
                                                     <span className="text-2xl font-bold opacity-70">%</span>
                                                 </div>
-                                                <p className="mt-4 text-[10px] font-medium opacity-60">基于 {evalResult.n_queries} 次随机查询，对比 Exact Top-{evalResult.k || topK}</p>
+                                                <p className="mt-4 text-[10px] font-medium opacity-60">Recall@{evalResult.k || topK} · {evalResult.n_queries} 次采样</p>
+                                            </div>
+                                            <div className="p-10 bg-purple-600 text-white rounded-[3rem] shadow-xl">
+                                                <p className="text-xs font-black uppercase text-purple-100 mb-2">MEMORY · 内存</p>
+                                                <div className="flex items-baseline gap-2">
+                                                    <span className="text-4xl font-black">{evalResult.index_size_label || '—'}</span>
+                                                </div>
+                                                <p className="mt-4 text-[10px] font-medium opacity-70">
+                                                    {evalResult.memory_ratio != null
+                                                        ? `相对 Exact 占用 ${(evalResult.memory_ratio * 100).toFixed(1)}%（Exact: ${evalResult.exact_index_size_label || '—'}）`
+                                                        : '重新运行评测以刷新内存指标'}
+                                                </p>
+                                            </div>
                                             </div>
                                         </div>
                                     )}
 
                                     {evalBatchResults && evalBatchResults.length > 0 && (
                                         <div className="space-y-4">
-                                            <h4 className="font-black text-lg uppercase tracking-tight">全部 ANN 对比结果</h4>
+                                            <div className="flex flex-wrap justify-between items-center gap-3">
+                                                <h4 className="font-black text-lg uppercase tracking-tight">三维对比：精度 · 延迟 · 内存</h4>
+                                                <p className="text-[10px] text-slate-400">内存比 = ANN 索引文件大小 / Exact 索引文件大小</p>
+                                            </div>
                                             <div className="overflow-x-auto rounded-2xl border border-slate-100">
                                                 <table className="w-full text-sm">
                                                     <thead className="bg-slate-50 text-[10px] font-black uppercase text-slate-400">
@@ -1862,6 +1997,8 @@
                                                             <th className="text-left p-3">Recall@{topK}</th>
                                                             <th className="text-left p-3">加速比</th>
                                                             <th className="text-left p-3">ANN 耗时</th>
+                                                            <th className="text-left p-3">索引大小</th>
+                                                            <th className="text-left p-3">内存比</th>
                                                             <th className="text-left p-3">Exact 耗时</th>
                                                         </tr>
                                                     </thead>
@@ -1879,6 +2016,8 @@
                                                                     </td>
                                                                     <td className="p-3 font-bold">{r.speedup?.toFixed(2)}×</td>
                                                                     <td className="p-3 text-blue-600 font-bold">{r.avg_ann_time_ms?.toFixed(2)} ms</td>
+                                                                    <td className="p-3 text-xs font-bold text-slate-600">{r.index_size_label || `${(r.index_size_mb || 0).toFixed(2)} MB`}</td>
+                                                                    <td className="p-3 text-xs font-bold text-purple-600">{r.memory_ratio != null ? `${(r.memory_ratio * 100).toFixed(1)}%` : '—'}</td>
                                                                     <td className="p-3 text-slate-500">{r.avg_exact_time_ms?.toFixed(2)} ms</td>
                                                                 </tr>
                                                             ))}
@@ -1905,6 +2044,7 @@
                                                             <th className="text-left p-3">Recall@K</th>
                                                             <th className="text-left p-3">QPS</th>
                                                             <th className="text-left p-3">ANN 延迟</th>
+                                                            <th className="text-left p-3">索引大小</th>
                                                         </tr>
                                                     </thead>
                                                     <tbody>
@@ -1919,6 +2059,7 @@
                                                                 </td>
                                                                 <td className="p-3 text-xs font-bold">{(r.qps || 0).toFixed(1)}</td>
                                                                 <td className="p-3 text-xs text-blue-600 font-bold">{(r.avg_latency_ms || 0).toFixed(2)} ms</td>
+                                                                <td className="p-3 text-xs text-slate-600 font-bold">{r.index_size_label || '—'}</td>
                                                             </tr>
                                                         ))}
                                                     </tbody>
@@ -2070,7 +2211,7 @@
                                                     <div className="w-14 h-14 rounded-2xl bg-violet-50 flex items-center justify-center text-2xl">🧬</div>
                                                     <p className="text-sm font-bold text-slate-500">用自然语言描述你想找的细胞</p>
                                                     <div className="space-y-2 text-xs text-slate-400">
-                                                        {['找肝脏中的巨噬细胞，返回20个', '查询所有 CD4+ T 细胞', '找与炎症相关的单核细胞'].map(ex => (
+                                                        {['找肝脏中的巨噬细胞，返回20个', '找与 DS0_CELL_0001 相似的细胞', '找与 CD4 T 细胞相似的细胞'].map(ex => (
                                                             <button key={ex} onClick={() => setChatInput(ex)}
                                                                 className="block w-full text-left px-3 py-2 rounded-xl bg-slate-50 hover:bg-violet-50 hover:text-violet-600 transition-colors">
                                                                 "{ex}"
@@ -2095,6 +2236,19 @@
                                                                     <span className="text-[10px] bg-violet-100 text-violet-600 px-2 py-0.5 rounded-full font-bold">
                                                                         命中 {msg.data.total_matched} 个 · 展示 {msg.data.found} 个
                                                                     </span>
+                                                                    {msg.data.search_mode_label && (
+                                                                        <span className="text-[10px] bg-emerald-50 text-emerald-600 px-2 py-0.5 rounded-full font-bold">
+                                                                            {msg.data.search_mode_label}
+                                                                        </span>
+                                                                    )}
+                                                                    {msg.data.index_type && (
+                                                                        <span className="text-[10px] bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full font-bold">
+                                                                            {msg.data.index_type.toUpperCase()}
+                                                                        </span>
+                                                                    )}
+                                                                    {msg.data.query_time_ms > 0 && (
+                                                                        <span className="text-[10px] text-slate-400">{msg.data.query_time_ms.toFixed(1)} ms</span>
+                                                                    )}
                                                                 </div>
                                                                 {msg.data.filters_applied && Object.keys(msg.data.filters_applied).length > 0 && (
                                                                     <div className="mt-1 flex flex-wrap gap-1">

@@ -7,6 +7,7 @@ from ..decorators import expert_required, login_required_api
 from ..models import db, Dataset, AnnIndex, EvaluationReport
 from ..index.manager import search_index, _ensure_vectors, index_is_usable
 from .metrics import recall_at_k
+from .storage import ensure_evaluation_report_schema, index_file_size_bytes, format_bytes
 from . import evaluate_bp
 
 _ANN_INDEX_TYPES = {'hnsw', 'ivf_flat', 'ivf_pq'}
@@ -15,6 +16,8 @@ _ANN_INDEX_TYPES = {'hnsw', 'ivf_flat', 'ivf_pq'}
 def _report_to_dict(report: EvaluationReport) -> dict:
     ds = db.session.get(Dataset, report.dataset_id)
     idx = report.index
+    ann_bytes = report.index_size_bytes or 0
+    exact_bytes = report.exact_index_size_bytes or 0
     return {
         'id': report.id,
         'dataset_id': report.dataset_id,
@@ -26,6 +29,13 @@ def _report_to_dict(report: EvaluationReport) -> dict:
         'avg_latency_ms': report.avg_latency,
         'n_queries': report.n_queries,
         'k': report.k,
+        'index_size_bytes': ann_bytes,
+        'exact_index_size_bytes': exact_bytes,
+        'index_size_mb': round(ann_bytes / (1024 * 1024), 3) if ann_bytes else 0,
+        'exact_index_size_mb': round(exact_bytes / (1024 * 1024), 3) if exact_bytes else 0,
+        'memory_ratio': round(ann_bytes / exact_bytes, 3) if ann_bytes and exact_bytes else None,
+        'index_size_label': format_bytes(int(ann_bytes)),
+        'exact_index_size_label': format_bytes(int(exact_bytes)),
         'created_at': report.created_at.isoformat(),
     }
 
@@ -80,6 +90,10 @@ def _run_single_benchmark(dataset_id: int, target_index: AnnIndex, k: int, n_que
     avg_exact_latency = float(np.mean(exact_latencies))
     speedup = avg_exact_latency / avg_ann_latency if avg_ann_latency > 0 else 1.0
 
+    ann_size = index_file_size_bytes(target_index)
+    exact_size = index_file_size_bytes(gt_index)
+    memory_ratio = ann_size / exact_size if ann_size and exact_size else None
+
     report = EvaluationReport(
         dataset_id=dataset_id,
         index_id=target_index.id,
@@ -88,6 +102,8 @@ def _run_single_benchmark(dataset_id: int, target_index: AnnIndex, k: int, n_que
         avg_latency=avg_ann_latency,
         n_queries=n_queries,
         k=k,
+        index_size_bytes=float(ann_size),
+        exact_index_size_bytes=float(exact_size),
     )
     db.session.add(report)
     db.session.commit()
@@ -103,6 +119,13 @@ def _run_single_benchmark(dataset_id: int, target_index: AnnIndex, k: int, n_que
         'avg_exact_time_ms': round(avg_exact_latency, 2),
         'speedup': round(speedup, 2),
         'k': k,
+        'index_size_bytes': ann_size,
+        'exact_index_size_bytes': exact_size,
+        'index_size_mb': round(ann_size / (1024 * 1024), 3),
+        'exact_index_size_mb': round(exact_size / (1024 * 1024), 3),
+        'memory_ratio': round(memory_ratio, 3) if memory_ratio else None,
+        'index_size_label': format_bytes(ann_size),
+        'exact_index_size_label': format_bytes(exact_size),
         'timestamp': report.created_at.isoformat(),
     }
 
@@ -112,6 +135,7 @@ def _run_single_benchmark(dataset_id: int, target_index: AnnIndex, k: int, n_que
 @expert_required
 def list_reports():
     """列出评测报告（可按 dataset_id 过滤）。"""
+    ensure_evaluation_report_schema()
     dataset_id = request.args.get('dataset_id', type=int)
     limit = min(100, max(1, int(request.args.get('limit', 30))))
 
@@ -128,6 +152,7 @@ def list_reports():
 @expert_required
 def trigger_evaluate(dataset_id):
     """触发性能评测 (仅限 expert 以上角色)"""
+    ensure_evaluation_report_schema()
     data_json = request.get_json() or {}
     index_id  = data_json.get('index_id')
     k         = data_json.get('k', 10)
@@ -161,6 +186,7 @@ def trigger_evaluate(dataset_id):
 @expert_required
 def trigger_batch_evaluate(dataset_id):
     """对数据集上全部 ready 的 ANN 索引批量 benchmark。"""
+    ensure_evaluation_report_schema()
     data_json = request.get_json() or {}
     k = data_json.get('k', 10)
     n_queries = data_json.get('n_queries', 50)
